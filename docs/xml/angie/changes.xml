@@ -5,29 +5,36 @@
 <change_log title="Angie">
 
 
-<changes ver="1.7.0" date="">
+<changes ver="1.8.0" date="">
 
 <change type="feature">
 <para lang="ru">
-переменная $ssl_server_cert_type, принимающая значения "RSA", "DSA", "ECDSA",
-"ED448", "ED25519", "SM2", "RSA-PSS" или "unknown" в зависимости от типа
-сертификата и ключа.
+поддержка кросс-компиляции: система сборки теперь может использовать
+скрипт-обёртку для запуска автотестов.
+Это позволяет сконфигурировать angie без запуска тестовых программ
+на сборочной машине.
 </para>
 <para lang="en">
-the $ssl_server_cert_type variable, which takes the values "RSA", "DSA",
-"ECDSA", "ED448", "ED25519", "SM2", "RSA-PSS", or "unknown" depending on the
-certificate and key type.
+cross-compilation support: build system now allows to specify a wrapper
+script used to run autotests.
+This makes it possible to configure angie without executing test
+binaries on build host.
 </para>
 </change>
 
-<change type="feature">
+</changes>
+
+
+<changes ver="1.7.0" date="2024-09-19">
+
+<change type="change">
 <para lang="ru">
-группа метрик "sent", в которую входят счётчики отправленных типов DNS-запросов,
-для статистики резолвера в зоне разделяемой памяти.
+обновлены текстовые описания кодов HTTP-ответов в соответствии с RFC 9110.<br/>
+Спасибо Максиму Дунину (freenginx) и Михилу В. Бейену.
 </para>
 <para lang="en">
-metric group "sent" for resolver statistics in a shared memory zone,
-containing counters of DNS query types sent.
+updated descriptions of HTTP status codes in conformance with RFC 9110.<br/>
+Thanks to Maxim Dounin (freenginx) and Michiel W. Beijen.
 </para>
 </change>
 
@@ -41,23 +48,6 @@ containing counters of DNS query types sent.
 a maximum of one empty line is now allowed before an HTTP request to better
 protect against DoS attacks.<br/>
 Thanks to Maxim Dounin (freenginx).
-</para>
-</change>
-
-<change type="change">
-<para lang="ru">
-при чтении тела запроса с использованием HTTP/1.1 "chunked transfer encoding"
-суммарный размер игнорируемых "chunk extensions" и полей "trailer header"
-теперь ограничен директивой "client_max_body_size" для улучшения защиты против
-DoS-атак.<br/>
-Спасибо Максиму Дунину (freenginx) и Bartek Nowotarski.
-</para>
-<para lang="en">
-when reading a request body using HTTP/1.1 chunked transfer encoding,
-the total size of ignored chunk extensions and trailer header fields
-is now limited by the "client_max_body_size" directive to better protect
-against DoS attacks.<br/>
-Thanks to Maxim Dounin (freenginx) and Bartek Nowotarski.
 </para>
 </change>
 
@@ -78,12 +68,18 @@ Thanks to Maxim Dounin (freenginx) and Maksim Yevmenkin.
 
 <change type="change">
 <para lang="ru">
-обновлены текстовые описания кодов HTTP-ответов в соответствии с RFC 9110.<br/>
-Спасибо Максиму Дунину (freenginx) и Michiel W. Beijen.
+при чтении тела запроса с использованием HTTP/1.1 "chunked transfer encoding"
+суммарный размер игнорируемых "chunk extensions" и полей "trailer header"
+теперь ограничен директивой "client_max_body_size" для улучшения защиты против
+DoS-атак.<br/>
+Спасибо Максиму Дунину (freenginx) и Бартеку Новотарскому.
 </para>
 <para lang="en">
-updated descriptions of HTTP status codes in conformance with RFC 9110.<br/>
-Thanks to Maxim Dounin (freenginx) and Michiel W. Beijen.
+when reading a request body using HTTP/1.1 chunked transfer encoding,
+the total size of ignored chunk extensions and trailer header fields
+is now limited by the "client_max_body_size" directive to better protect
+against DoS attacks.<br/>
+Thanks to Maxim Dounin (freenginx) and Bartek Nowotarski.
 </para>
 </change>
 
@@ -105,6 +101,43 @@ Thanks to Yuriy Izorkin.
 
 <change type="feature">
 <para lang="ru">
+принудительное закрытие соединений к проксируемому серверу при удалении его
+из группы, настраиваемое с помощью директив "proxy_connection_drop",
+"grpc_connection_drop", "fastcgi_connection_drop", "scgi_connection_drop"
+и "uwsgi_connection_drop".
+</para>
+<para lang="en">
+forced closing all the connections to a proxied server when it's removed
+from the group can be configured via the "proxy_connection_drop",
+"grpc_connection_drop", "fastcgi_connection_drop", "scgi_connection_drop",
+and "uwsgi_connection_drop" directives.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+счетчики отдельных типов отправленных DNS-запросов в API статистики резолвера,
+собираемой параметром "status_zone" директивы "resolver".
+</para>
+<para lang="en">
+counters of sent DNS query types in the resolver statistics API, which is
+collected with the "status_zone" parameter of the "resolver" directive.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+переменная "$ssl_server_cert_type", содержащая тип выбранного сертификата
+при приеме TLS-соединения.
+</para>
+<para lang="en">
+the "$ssl_server_cert_type" variable that contains the type of selected
+certificate for a received TLS-connection.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
 отключение создания PID-файла с помощью параметра "off" в директиве "pid", что
 может быть полезным для неизменяемых образов и при непосредственном управлении
 менеджером процессов.<br/>
@@ -121,28 +154,13 @@ Thanks to Maxim Dounin (freenginx).
 <change type="feature">
 <para lang="ru">
 создание PID-файла теперь выполняется атомарно через промежуточный временный
-файл, что убирает мгновение, когда файл уже появился в директории, но ещё пуст,
+файл, что исключает момент, когда файл уже появился в директории, но еще пуст,
 и позволяет внешним программам проще и надежнее с ним работать.
 </para>
 <para lang="en">
 creation of the PID file made atomic via an intermediate temporary file, which
 removes a moment when the file is already in the directory but still empty,
-and allows external programs to handle it easier and reliable.
-</para>
-</change>
-
-<change type="feature">
-<para lang="ru">
-ошибки записи в syslog теперь логгируются не чаще одного раза в секунду,
-что помогает предотвратить избыточное засорение логов подобными сообщениями
-в случаях перегрузки или сбоя syslog-сервера.<br/>
-Спасибо Максиму Дунину (freenginx).
-</para>
-<para lang="en">
-syslog logging errors are now reported no more than once per second; this helps
-avoid flooding the logs with such messages when the syslog server is down or
-overloaded.<br/>
-Thanks to Maxim Dounin (freenginx).
+and allows external programs to handle it more easily and reliably.
 </para>
 </change>
 
@@ -155,10 +173,25 @@ Thanks to Maxim Dounin (freenginx).
 Спасибо Максиму Дунину (freenginx).
 </para>
 <para lang="en">
-now during reconfiguration no attempt to recreate the PID file is made
-if the name in the "pid" directive was changed, but points to the same file
-via symlinks; in particular, it allows to avoid issues on systems while
-migrating from "/var/run/angie.pid" to "/run/angie.pid".<br/>
+now, during reconfiguration, no attempt is made to recreate the PID file
+if the name in the "pid" directive has changed but points to the same file
+via symlinks; in particular, it allows avoiding issues on systems that migrate
+from "/var/run/angie.pid" to "/run/angie.pid".<br/>
+Thanks to Maxim Dounin (freenginx).
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+ошибки записи в syslog теперь логгируются не чаще одного раза в секунду,
+что помогает предотвратить засорение логов подобными сообщениями в случаях
+перегрузки или сбоя syslog-сервера.<br/>
+Спасибо Максиму Дунину (freenginx).
+</para>
+<para lang="en">
+syslog logging errors are now reported no more than once per second; this helps
+avoid flooding the logs with such messages when the syslog server is down or
+overloaded.<br/>
 Thanks to Maxim Dounin (freenginx).
 </para>
 </change>
@@ -175,6 +208,17 @@ in the Mail proxy module, the maximum number of commands during authentication,
 configured with the "max_commands" directive, is limited to better protect
 against DoS attacks.<br/>
 Thanks to Maxim Dounin (freenginx).
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+опция "--feature-cache" скрипта ./configure для кэширования результатов его
+работы с целью оптимизации массовой сборки модулей или кросс-компиляции.
+</para>
+<para lang="en">
+the "--feature-cache" option of the ./configure script to cache its results
+for optimization when building multiple modules or cross-compiling.
 </para>
 </change>
 
@@ -261,7 +305,7 @@ the bug had appeared in 1.6.0.
 <para lang="ru">
 обработка закэшированных ответов с заголовком "X-Accel-Redirect" могла
 приводить к падению рабочего процесса.<br/>
-Спасибо Максиму Дунину (freenginx) и Jiří Setnička.
+Спасибо Максиму Дунину (freenginx) и Иржи Сетничке.
 </para>
 <para lang="en">
 handling cached responses with the "X-Accel-Redirect" header could
