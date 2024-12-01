@@ -1,6 +1,5 @@
 #!/usr/bin/perl
 
-# (C) 2024 Web Server LLC
 # (C) Sergey Kandaurov
 # (C) Nginx, Inc.
 
@@ -19,13 +18,14 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 
 use lib 'lib';
 use Test::Nginx;
+use Test::Nginx::Stream qw/ stream /;
 
 ###############################################################################
 
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http http_ssl socket_ssl/)
+my $t = Test::Nginx->new()->has(qw/stream stream_ssl socket_ssl_sslversion/)
 	->has_daemon('openssl');
 
 eval { defined &Net::SSLeay::set_tlsext_status_type or die; };
@@ -33,14 +33,9 @@ plan(skip_all => 'Net::SSLeay too old') if $@;
 eval { defined &IO::Socket::SSL::SSL_OCSP_TRY_STAPLE or die; };
 plan(skip_all => 'IO::Socket::SSL too old') if $@;
 
-plan(skip_all => 'no OCSP stapling')
-	if $t->has_module('BoringSSL');
-plan(skip_all => 'no OCSP stapling')
-	if $t->has_module('OpenSSL') and not $t->has_feature('openssl:0.9.8h');
-plan(skip_all => 'no OCSP stapling')
-	if not $t->has_module('sni');
+plan(skip_all => 'no OCSP stapling') if $t->has_module('BoringSSL');
 
-$t->plan(10)->write_file_expand('nginx.conf', <<'EOF');
+$t->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
 
@@ -49,8 +44,8 @@ daemon off;
 events {
 }
 
-http {
-    %%TEST_GLOBALS_HTTP%%
+stream {
+    %%TEST_GLOBALS_STREAM%%
 
     ssl_stapling on;
     ssl_trusted_certificate trusted.crt;
@@ -62,8 +57,6 @@ http {
     ssl_certificate_key end.key;
 
     ssl_ciphers DEFAULT:ECCdraft;
-
-    add_header X-SSL-Protocol $ssl_protocol always;
 
     server {
         listen       127.0.0.1:8443 ssl;
@@ -247,7 +240,7 @@ $t->write_file('ec-end-int.crt',
 	$t->read_file('ec-end.crt') . $t->read_file('int.crt'));
 
 $t->run_daemon(\&http_daemon, $t);
-$t->run();
+$t->try_run('no ssl_stapling')->plan(10);
 
 $t->waitforsocket("127.0.0.1:" . port(8081));
 
@@ -268,8 +261,6 @@ ok(!staple(8443, 'RSA'), 'staple revoked');
 TODO: {
 local $TODO = 'broken TLSv1.3 sigalgs in LibreSSL'
 	if $t->has_module('LibreSSL') && test_tls13();
-local $TODO = 'no TLSv1.3 sigalgs in Net::SSLeay (LibreSSL)'
-	if Net::SSLeay::constant("LIBRESSL_VERSION_NUMBER") && test_tls13();
 
 ok(staple(8443, 'ECDSA'), 'staple success');
 
@@ -280,8 +271,6 @@ ok(!staple(8444, 'RSA'), 'responder revoked');
 TODO: {
 local $TODO = 'broken TLSv1.3 sigalgs in LibreSSL'
 	if $t->has_module('LibreSSL') && test_tls13();
-local $TODO = 'no TLSv1.3 sigalgs in Net::SSLeay (LibreSSL)'
-	if Net::SSLeay::constant("LIBRESSL_VERSION_NUMBER") && test_tls13();
 
 ok(staple(8444, 'ECDSA'), 'responder success');
 
@@ -298,10 +287,7 @@ ok(!staple(8449, 'ECDSA'), 'ocsp error');
 
 TODO: {
 local $TODO = 'broken TLSv1.3 sigalgs in LibreSSL'
-	if $t->has_module('LibreSSL')
-		&& !Net::SSLeay::constant("LIBRESSL_VERSION_NUMBER")
-		&& not $t->has_feature('libressl:4.0.0')
-		&& test_tls13();
+	if $t->has_module('LibreSSL') && test_tls13();
 
 like(`grep -F '[crit]' ${\($t->testdir())}/error.log`, qr/^$/s, 'no crit');
 
@@ -360,7 +346,8 @@ sub staple {
 }
 
 sub test_tls13 {
-	return http_get('/', SSL => 1) =~ /TLSv1.3/;
+	my $s = stream(PeerAddr => '127.0.0.1:' . port(8443), SSL => 1);
+	$s->socket()->get_sslversion_int() > 0x303;
 }
 
 ###############################################################################

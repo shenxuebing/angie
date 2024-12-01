@@ -24,7 +24,8 @@ use Test::Nginx::Stream qw/ stream /;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/stream stream_return stream_map/)
+my $t = Test::Nginx->new()
+	->has(qw/stream stream_return stream_map rewrite/)->plan(14)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -63,7 +64,7 @@ stream {
 
 EOF
 
-$t->try_run('no proxy_protocol tlv')->plan(14);
+$t->run();
 
 ###############################################################################
 
