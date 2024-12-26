@@ -4695,6 +4695,10 @@ ngx_http_upstream_store(ngx_http_request_t *r, ngx_http_upstream_t *u)
                    "upstream stores \"%s\" to \"%s\"",
                    tf->file.name.data, path.data);
 
+    if (path.len == 0) {
+        return;
+    }
+
     (void) ngx_ext_rename_file(&tf->file.name, &path, &ext);
 
     u->store = 0;
@@ -7316,7 +7320,13 @@ ngx_http_v3_upstream_init_connection(ngx_http_request_t *r,
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
                    "http3 upstream init connection on c:%p", c);
 
-    c->sockaddr = u->peer.sockaddr;
+    c->sockaddr = ngx_palloc(c->pool, u->peer.socklen);
+    if (c->sockaddr == NULL) {
+       return NGX_ERROR;
+    }
+
+    ngx_memcpy(c->sockaddr, u->peer.sockaddr, u->peer.socklen);
+
     c->socklen = u->peer.socklen;
 
     c->addr_text.data = ngx_pnalloc(c->pool, u->peer.name->len);
@@ -7410,14 +7420,27 @@ ngx_http_v3_upstream_init_ssl(ngx_connection_t *c, void *data)
         }
     }
 
-    if (u->conf->ssl_certificate
-        && u->conf->ssl_certificate->value.len
-        && (u->conf->ssl_certificate->lengths
-            || u->conf->ssl_certificate_key->lengths))
-    {
-        if (ngx_http_upstream_ssl_certificate(r, u, c) != NGX_OK) {
+#if (NGX_HTTP_PROXY_MULTICERT)
+
+    if (u->conf->ssl_certificate_values) {
+        if (ngx_http_upstream_ssl_certificates(r, u, c) != NGX_OK) {
             return NGX_ERROR;
         }
+
+    } else
+
+#endif
+    {
+        if (u->conf->ssl_certificate
+            && u->conf->ssl_certificate->value.len
+            && (u->conf->ssl_certificate->lengths
+                || u->conf->ssl_certificate_key->lengths))
+        {
+            if (ngx_http_upstream_ssl_certificate(r, u, c) != NGX_OK) {
+                return NGX_ERROR;
+            }
+        }
+
     }
 
     if (u->conf->ssl_session_reuse) {
@@ -7594,7 +7617,8 @@ ngx_http_v3_upstream_connected(ngx_http_request_t *r, ngx_http_upstream_t *u,
     }
 
     if (!u->hq) {
-        if (ngx_http_v3_send_settings(c) != NGX_OK) {
+        if (ngx_http_v3_send_settings(c, &u->conf->h3_settings) != NGX_OK) {
+
             /* example error: qc->closing is set */
             return NGX_ERROR;
         }

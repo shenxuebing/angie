@@ -751,6 +751,8 @@ ngx_stream_upstream_zone_preresolve(ngx_stream_upstream_rr_peer_t *resolve,
                 addr.name = opeer->server;
                 addr.weight = opeer->weight;
 
+                template->host->valid = host->valid;
+
                 peer = ngx_stream_upstream_zone_new_peer(peers, &addr,
                                                          template);
                 if (peer == NULL) {
@@ -914,23 +916,14 @@ ngx_api_stream_upstream_peers_handler(ngx_api_entry_data_t data,
 {
     ngx_stream_upstream_srv_conf_t *uscf = ctx;
 
-    ngx_int_t                             rc;
-    ngx_api_iter_ctx_t                    ictx;
-    ngx_stream_upstream_rr_peers_t       *peers;
-    ngx_api_stream_upstream_peers_ctx_t   peers_ctx;
+    ngx_int_t                            rc;
+    ngx_api_iter_ctx_t                   ictx;
+    ngx_api_stream_upstream_peers_ctx_t  peers_ctx;
 
-    peers = uscf->peer.data;
+    ngx_memzero(&peers_ctx, sizeof(ngx_api_stream_upstream_peers_ctx_t));
 
-    ngx_stream_upstream_rr_peers_rlock(peers);
-
-    if (peers->next) {
-        ngx_stream_upstream_rr_peers_rlock(peers->next);
-    }
-
-    peers_ctx.peer = NULL;
-    peers_ctx.peers = peers;
+    peers_ctx.peers = uscf->peer.data;
     peers_ctx.uscf = uscf;
-    peers_ctx.backup = 0;
 
     ngx_memzero(&ictx, sizeof(ngx_api_iter_ctx_t));
 
@@ -941,10 +934,10 @@ ngx_api_stream_upstream_peers_handler(ngx_api_entry_data_t data,
     rc = ngx_api_object_iterate(ngx_api_stream_upstream_peers_iter,
                                 &ictx, actx);
 
-    ngx_stream_upstream_rr_peers_unlock(peers);
-
-    if (peers->next) {
-        ngx_stream_upstream_rr_peers_unlock(peers->next);
+    if (peers_ctx.locked) {
+        /* some problems while iteration */
+        ngx_stream_upstream_rr_peer_unlock(peers_ctx.peers, peers_ctx.peer);
+        ngx_stream_upstream_rr_peers_unlock(peers_ctx.peers);
     }
 
     return rc;
@@ -959,17 +952,28 @@ ngx_api_stream_upstream_peers_iter(ngx_api_iter_ctx_t *ictx,
 
     pctx = ictx->ctx;
 
-    pctx->peer = (pctx->peer == NULL) ? pctx->peers->peer : pctx->peer->next;
+    if (pctx->peer == NULL) {
+        ngx_stream_upstream_rr_peers_rlock(pctx->peers);
+        pctx->peer = pctx->peers->peer;
+
+    } else {
+        ngx_stream_upstream_rr_peer_unlock(pctx->peers, pctx->peer);
+        pctx->peer = pctx->peer->next;
+    }
 
     for ( ;; ) {
 
         if (pctx->peer == NULL) {
+            ngx_stream_upstream_rr_peers_unlock(pctx->peers);
 
+            pctx->locked = 0;
             pctx->peers = pctx->peers->next;
 
             if (pctx->peers == NULL) {
                 return NGX_DECLINED;
             }
+
+            ngx_stream_upstream_rr_peers_rlock(pctx->peers);
 
             pctx->backup = 1;
             pctx->peer = pctx->peers->peer;
@@ -978,6 +982,9 @@ ngx_api_stream_upstream_peers_iter(ngx_api_iter_ctx_t *ictx,
         }
 
         ictx->entry.name = pctx->peer->name;
+
+        ngx_stream_upstream_rr_peer_lock(pctx->peers, pctx->peer);
+        pctx->locked = 1;
 
         return NGX_OK;
     }
@@ -1241,6 +1248,8 @@ ngx_api_stream_upstream_peer_sid_handler(ngx_api_entry_data_t data,
 static ngx_int_t
 ngx_stream_upstream_zone_init_worker(ngx_cycle_t *cycle)
 {
+    time_t                            now;
+    ngx_msec_t                        timer;
     ngx_uint_t                        i;
     ngx_event_t                      *event;
     ngx_stream_upstream_rr_peer_t    *peer;
@@ -1254,6 +1263,7 @@ ngx_stream_upstream_zone_init_worker(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
+    now = ngx_time();
     umcf = ngx_stream_cycle_get_module_main_conf(cycle,
                                                  ngx_stream_upstream_module);
     if (umcf == NULL) {
@@ -1290,7 +1300,11 @@ ngx_stream_upstream_zone_init_worker(ngx_cycle_t *cycle)
                 event->cancelable = 1;
 
                 ngx_stream_upstream_rr_peer_ref(peers, peer);
-                ngx_add_timer(event, 1);
+
+                timer = (peer->host->valid > now)
+                        ? (ngx_msec_t) 1000 * (peer->host->valid - now) : 1;
+
+                ngx_add_timer(event, timer);
             }
 
             ngx_stream_upstream_rr_peers_unlock(peers);
@@ -1618,6 +1632,8 @@ again:
 done:
 
     ngx_stream_upstream_set_round_robin_single(uscf);
+
+    host->valid = ctx->valid;
 
     ngx_stream_upstream_rr_peers_unlock(peers);
 
