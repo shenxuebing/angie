@@ -11,6 +11,14 @@
 #include <ngx_http.h>
 
 
+#if (NGX_API)
+
+#define ngx_http_server_stats_first(status_zone)                              \
+    &(status_zone)->zone->sh->first_node->stats.server
+
+#endif
+
+
 static void ngx_http_wait_request_handler(ngx_event_t *ev);
 static ngx_http_request_t *ngx_http_alloc_request(ngx_connection_t *c);
 static void ngx_http_process_request_line(ngx_event_t *rev);
@@ -59,6 +67,7 @@ static void ngx_http_ssl_handshake_handler(ngx_connection_t *c);
 #endif
 
 #if (NGX_API)
+static void ngx_http_calculate_post_request_statistic(ngx_http_request_t *r);
 static ngx_int_t ngx_api_http_zones_iter(ngx_api_iter_ctx_t *ictx,
     ngx_api_ctx_t *actx);
 static ngx_int_t ngx_api_http_zone_handler(ngx_api_entry_data_t data,
@@ -73,13 +82,9 @@ static ngx_http_server_stats_t *ngx_http_get_server_stats(ngx_http_request_t *r,
     ngx_http_status_zone_t *status_zone);
 static ngx_http_location_stats_t *ngx_http_get_location_stats(
     ngx_http_request_t *r, ngx_http_status_zone_t *status_zone);
-static void ngx_http_add_request_stats(ngx_http_request_t *r,
-    ngx_http_server_stats_t *stats);
 #if (NGX_HTTP_SSL)
 static ngx_int_t ngx_api_http_ssl_handler(ngx_api_entry_data_t data,
     ngx_api_ctx_t *actx, void *ctx);
-static void ngx_http_add_ssl_handshake_stats(ngx_ssl_conn_t *ssl_conn,
-    ngx_http_server_stats_t *stats, int num);
 #endif
 #endif
 
@@ -231,25 +236,25 @@ static ngx_api_entry_t  ngx_api_http_server_zone_ssl_entries[] = {
     {
         .name      = ngx_string("handshaked"),
         .handler   = ngx_api_struct_atomic_handler,
-        .data.off  = offsetof(ngx_http_server_stats_t, ssl_handshaked)
+        .data.off  = offsetof(ngx_http_server_stats_t, ssl.handshaked)
     },
 
     {
         .name      = ngx_string("reuses"),
         .handler   = ngx_api_struct_atomic_handler,
-        .data.off  = offsetof(ngx_http_server_stats_t, ssl_reuses)
+        .data.off  = offsetof(ngx_http_server_stats_t, ssl.reuses)
     },
 
     {
         .name      = ngx_string("timedout"),
         .handler   = ngx_api_struct_atomic_handler,
-        .data.off  = offsetof(ngx_http_server_stats_t, ssl_timedout)
+        .data.off  = offsetof(ngx_http_server_stats_t, ssl.timedout)
     },
 
     {
         .name      = ngx_string("failed"),
         .handler   = ngx_api_struct_atomic_handler,
-        .data.off  = offsetof(ngx_http_server_stats_t, ssl_failed)
+        .data.off  = offsetof(ngx_http_server_stats_t, ssl.failed)
     },
 
     ngx_api_null_entry
@@ -1023,8 +1028,6 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
     ngx_http_connection_t     *hc;
 #endif
 #if (NGX_API)
-    ngx_http_request_t        *r;
-    ngx_http_server_stats_t   *stats;
     ngx_http_core_srv_conf_t  *cscf;
 #endif
 
@@ -1038,28 +1041,7 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
     cscf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_core_module);
 
     if (cscf->status_zone != NULL) {
-        r = ngx_http_alloc_request(c);
-
-        if (r != NULL) {
-            stats = ngx_http_get_server_stats(r, cscf->status_zone);
-
-            ngx_http_free_request(r, 0);
-
-            if (stats != NULL) {
-                hc->server_stats = stats;
-
-                if (c->ssl->handshaked) {
-                    ngx_http_add_ssl_handshake_stats(c->ssl->connection,
-                                                     stats, 1);
-
-                } else if (c->read->timedout) {
-                    (void) ngx_atomic_fetch_add(&stats->ssl_timedout, 1);
-
-                } else {
-                    (void) ngx_atomic_fetch_add(&stats->ssl_failed, 1);
-                }
-            }
-        }
+        ngx_http_calculate_ssl_statistic(c, cscf->status_zone);
     }
 #endif
 
@@ -1179,6 +1161,31 @@ ngx_http_ssl_servername(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
         goto done;
     }
 
+    sscf = ngx_http_get_module_srv_conf(cscf->ctx, ngx_http_ssl_module);
+
+#if (defined TLS1_3_VERSION                                                   \
+     && !defined LIBRESSL_VERSION_NUMBER && !defined OPENSSL_IS_BORINGSSL)
+
+    /*
+     * SSL_SESSION_get0_hostname() is only available in OpenSSL 1.1.1+,
+     * but servername being negotiated in every TLSv1.3 handshake
+     * is only returned in OpenSSL 1.1.1+ as well
+     */
+
+    if (sscf->verify) {
+        const char  *hostname;
+
+        hostname = SSL_SESSION_get0_hostname(SSL_get0_session(ssl_conn));
+
+        if (hostname != NULL && ngx_strcmp(hostname, servername) != 0) {
+            c->ssl->handshake_rejected = 1;
+            *ad = SSL_AD_ACCESS_DENIED;
+            return SSL_TLSEXT_ERR_ALERT_FATAL;
+        }
+    }
+
+#endif
+
     hc->ssl_servername = ngx_palloc(c->pool, sizeof(ngx_str_t));
     if (hc->ssl_servername == NULL) {
         goto error;
@@ -1191,8 +1198,6 @@ ngx_http_ssl_servername(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg)
     clcf = ngx_http_get_module_loc_conf(hc->conf_ctx, ngx_http_core_module);
 
     ngx_set_connection_log(c, clcf->error_log);
-
-    sscf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_ssl_module);
 
     c->ssl->buffer_size = sscf->buffer_size;
 
@@ -1301,6 +1306,7 @@ ngx_http_ssl_certificate(ngx_ssl_conn_t *ssl_conn, void *arg)
                        "ssl key: \"%s\"", key.data);
 
         if (ngx_ssl_connection_certificate(c, r->pool, &cert, &key,
+                                           sscf->certificate_cache,
                                            sscf->passwords)
             != NGX_OK)
         {
@@ -2218,58 +2224,13 @@ ngx_http_process_request_header(ngx_http_request_t *r)
 
 #if (NGX_API)
     {
-#if (NGX_HTTP_SSL)
-    ngx_ssl_conn_t            *ssl_conn;
-    ngx_http_server_stats_t   *ostats;
-#endif
+        ngx_http_core_srv_conf_t  *cscf;
 
-    ngx_http_connection_t     *hc;
-    ngx_http_server_stats_t   *stats;
-    ngx_http_core_srv_conf_t  *cscf;
+        cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
 
-    cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
-
-    if (cscf->status_zone != NULL) {
-        stats = ngx_http_get_server_stats(r, cscf->status_zone);
-
-        hc = r->http_connection;
-
-        if (stats != NULL) {
-#if (NGX_HTTP_SSL)
-            if (r->connection->ssl != NULL) {
-                ostats = hc->server_stats;
-                ssl_conn = r->connection->ssl->connection;
-
-                /*
-                 * If the variable associated with the 'status_zone' directive
-                 * changes or acquires a value after establishing an
-                 * SSL handshake, we move the SSL statistics from the old
-                 * value to the new one, or, if no previous statistics exist,
-                 * we add new ones.
-                 */
-
-                if (ostats != NULL) {
-                    if (stats != ostats) {
-                        ngx_http_add_ssl_handshake_stats(ssl_conn, ostats, -1);
-                        ngx_http_add_ssl_handshake_stats(ssl_conn, stats, 1);
-                    }
-
-                } else {
-                    ngx_http_add_ssl_handshake_stats(ssl_conn, stats, 1);
-                }
-            }
-#endif
-
-            hc->server_stats = stats;
-
-            ngx_http_add_request_stats(r, stats);
+        if (cscf->status_zone != NULL) {
+            ngx_http_calculate_request_statistic(r, cscf->status_zone);
         }
-#if (NGX_HTTP_SSL)
-        else if (hc->server_stats != NULL) {
-            ngx_http_add_request_stats(r, hc->server_stats);
-        }
-#endif
-    }
     }
 #endif
 
@@ -4079,61 +4040,7 @@ ngx_http_free_request(ngx_http_request_t *r, ngx_int_t rc)
 #endif
 
 #if (NGX_API)
-    {
-    ngx_uint_t                  code, idx;
-    ngx_http_server_stats_t    *sstats;
-    ngx_http_location_stats_t  *lstats;
-
-    sstats = r->http_connection->server_stats;
-
-    if (sstats != NULL) {
-        if (r->stat_processing) {
-            (void) ngx_atomic_fetch_add(&sstats->processing, -1);
-        } else {
-            (void) ngx_atomic_fetch_add(&sstats->requests, 1);
-        }
-
-        (void) ngx_atomic_fetch_add(&sstats->received, r->request_length);
-
-        if (r->headers_out.status && r->connection->sent > 0) {
-
-            (void) ngx_atomic_fetch_add(&sstats->sent, r->connection->sent);
-
-            code = r->headers_out.status;
-            idx = (code >= 100 && code <= 599) ? code - 100 : 500;
-
-            (void) ngx_atomic_fetch_add(&sstats->responses[idx], 1);
-
-        } else {
-            (void) ngx_atomic_fetch_add(&sstats->discarded, 1);
-        }
-    }
-
-    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
-
-    if (clcf->status_zone != NULL) {
-        lstats = ngx_http_get_location_stats(r, clcf->status_zone);
-
-        if (lstats != NULL) {
-            (void) ngx_atomic_fetch_add(&lstats->requests, 1);
-
-            (void) ngx_atomic_fetch_add(&lstats->received, r->request_length);
-
-            if (r->headers_out.status && r->connection->sent > 0) {
-
-                (void) ngx_atomic_fetch_add(&lstats->sent, r->connection->sent);
-
-                code = r->headers_out.status;
-                idx = (code >= 100 && code <= 599) ? code - 100 : 500;
-
-                (void) ngx_atomic_fetch_add(&lstats->responses[idx], 1);
-
-            } else {
-                (void) ngx_atomic_fetch_add(&lstats->discarded, 1);
-            }
-        }
-    }
-    }
+    ngx_http_calculate_post_request_statistic(r);
 #endif
 
     if (rc > 0 && (r->headers_out.status == 0 || r->connection->sent == 0)) {
@@ -4354,30 +4261,200 @@ ngx_http_log_error_handler(ngx_http_request_t *r, ngx_http_request_t *sr,
 
 #if (NGX_API)
 
+void
+ngx_http_calculate_request_statistic(ngx_http_request_t *r,
+    ngx_http_status_zone_t *status_zone)
+{
+    ngx_http_server_stats_t  *stats;
+
+    stats = ngx_http_get_server_stats(r, status_zone);
+    if (stats == NULL) {
+        return;
+    }
+
+    (void) ngx_atomic_fetch_add(&stats->processing, 1);
+    (void) ngx_atomic_fetch_add(&stats->requests, 1);
+
+    r->server_stats = stats;
+}
+
+
+#if (NGX_HTTP_SSL)
+
+void
+ngx_http_calculate_ssl_statistic(ngx_connection_t *c,
+    ngx_http_status_zone_t *status_zone)
+{
+    ngx_http_request_t       *r;
+    ngx_http_server_stats_t  *stats;
+
+    if (status_zone->zone->count == 1) {
+        stats = ngx_http_server_stats_first(status_zone);
+
+    } else {
+        r = ngx_http_alloc_request(c);
+        if (r == NULL) {
+            return;
+        }
+
+        r->logged = 1;
+
+        stats = ngx_http_get_server_stats(r, status_zone);
+
+        ngx_http_free_request(r, 0);
+
+        c->log->action = "SSL handshaking";
+        c->destroyed = 0;
+    }
+
+    if (stats == NULL) {
+        return;
+    }
+
+    if (c->ssl->handshaked) {
+        (void) ngx_atomic_fetch_add(&stats->ssl.handshaked, 1);
+
+        if (SSL_session_reused(c->ssl->connection)) {
+            (void) ngx_atomic_fetch_add(&stats->ssl.reuses, 1);
+        }
+
+    } else if (c->read->timedout) {
+        (void) ngx_atomic_fetch_add(&stats->ssl.timedout, 1);
+
+    } else {
+        (void) ngx_atomic_fetch_add(&stats->ssl.failed, 1);
+    }
+}
+
+#endif
+
+
+static void
+ngx_http_calculate_post_request_statistic(ngx_http_request_t *r)
+{
+    ngx_uint_t                  code, idx;
+    ngx_http_server_stats_t    *sstats;
+    ngx_http_core_srv_conf_t   *cscf;
+    ngx_http_core_loc_conf_t   *clcf;
+    ngx_http_location_stats_t  *lstats;
+
+    sstats = r->server_stats;
+
+    if (sstats != NULL) {
+        (void) ngx_atomic_fetch_add(&sstats->processing, -1);
+
+    } else {
+        cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
+
+        if (cscf->status_zone == NULL) {
+            goto loc_stats;
+        }
+
+        if (!r->stat_reading) {
+            if (!r->stat_writing) {
+                return;
+            }
+
+            goto loc_stats;
+        }
+
+        sstats = ngx_http_get_server_stats(r, cscf->status_zone);
+
+        if (sstats == NULL) {
+            goto loc_stats;
+        }
+
+        (void) ngx_atomic_fetch_add(&sstats->requests, 1);
+    }
+
+    (void) ngx_atomic_fetch_add(&sstats->received, r->request_length);
+
+    if (r->headers_out.status && r->connection->sent > 0) {
+
+        (void) ngx_atomic_fetch_add(&sstats->sent, r->connection->sent);
+
+        code = r->headers_out.status;
+        idx = (code >= 100 && code <= 599) ? code - 100 : 500;
+
+        (void) ngx_atomic_fetch_add(&sstats->responses[idx], 1);
+
+    } else {
+        (void) ngx_atomic_fetch_add(&sstats->discarded, 1);
+    }
+
+loc_stats:
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    if (clcf->status_zone == NULL) {
+        return;
+    }
+
+    lstats = ngx_http_get_location_stats(r, clcf->status_zone);
+
+    if (lstats == NULL) {
+        return;
+    }
+
+    (void) ngx_atomic_fetch_add(&lstats->requests, 1);
+
+    (void) ngx_atomic_fetch_add(&lstats->received, r->request_length);
+
+    if (r->headers_out.status && r->connection->sent > 0) {
+        (void) ngx_atomic_fetch_add(&lstats->sent, r->connection->sent);
+
+        code = r->headers_out.status;
+        idx = (code >= 100 && code <= 599) ? code - 100 : 500;
+
+        (void) ngx_atomic_fetch_add(&lstats->responses[idx], 1);
+
+    } else {
+        (void) ngx_atomic_fetch_add(&lstats->discarded, 1);
+    }
+}
+
+
 static ngx_int_t
-ngx_api_status_zone_iterate(ngx_api_ctx_t *actx, ngx_http_stats_zone_t *zone,
+ngx_api_status_zone_iterate(ngx_api_ctx_t *actx, ngx_http_stats_zone_t *zones,
     ngx_api_entry_t *entries)
 {
-    ngx_int_t           rc;
-    ngx_api_iter_ctx_t  ictx;
+    ngx_int_t               rc;
+    ngx_str_t               path;
+    ngx_api_iter_ctx_t      ictx;
+    ngx_http_stats_zone_t  *zone;
 
-    if (zone == NULL) {
-        return NGX_DECLINED;
-    }
+    rc = NGX_DECLINED;
 
     ictx.entry.handler = ngx_api_object_handler;
     ictx.entry.data.ents = entries;
-    ictx.elts = zone;
 
-    zone->current_node = zone->sh->first_node;
-    ngx_rwlock_rlock(&zone->sh->lock);
+    path = actx->path;
 
-    rc = ngx_api_object_iterate(ngx_api_http_zones_iter, &ictx, actx);
+    for (zone = zones; zone; zone = zone->next) {
+        ictx.elts = zone;
 
-    zone = ictx.elts;
+        ngx_rwlock_rlock(&zone->sh->lock);
 
-    if (rc != NGX_OK && zone != NULL) {
+        zone->current_node = zone->sh->first_node;
+
+        rc = ngx_api_object_iterate(ngx_api_http_zones_iter, &ictx, actx);
+
         ngx_rwlock_unlock(&zone->sh->lock);
+
+        /* single zone */
+        if (path.len != 0) {
+
+            if (rc == NGX_API_NOT_FOUND) {
+                actx->path = path;
+                continue;
+            }
+
+            break;
+        }
+
+        if (rc != NGX_OK) {
+            break;
+        }
     }
 
     return rc;
@@ -4417,32 +4494,17 @@ ngx_api_http_zones_iter(ngx_api_iter_ctx_t *ictx, ngx_api_ctx_t *actx)
     ngx_http_stats_zone_node_t  *stats_zone;
 
     zone = ictx->elts;
+    stats_zone = zone->current_node;
 
-    if (zone == NULL) {
+    if (stats_zone == NULL) {
         return NGX_DECLINED;
     }
 
-    stats_zone = zone->current_node;
-
     ictx->entry.name.data = stats_zone->data;
     ictx->entry.name.len = stats_zone->len;
-
     ictx->ctx = stats_zone;
 
     zone->current_node = stats_zone->next;
-
-    if (stats_zone->next == NULL) {
-        ngx_rwlock_unlock(&zone->sh->lock);
-
-        zone = zone->next;
-
-        ictx->elts = zone;
-
-        if (zone != NULL) {
-            zone->current_node = zone->sh->first_node;
-            ngx_rwlock_rlock(&zone->sh->lock);
-        }
-    }
 
     return NGX_OK;
 }
@@ -4669,15 +4731,6 @@ ngx_http_get_location_stats(ngx_http_request_t *r,
 }
 
 
-static void
-ngx_http_add_request_stats(ngx_http_request_t *r,
-    ngx_http_server_stats_t *stats)
-{
-    (void) ngx_atomic_fetch_add(&stats->processing, 1);
-    r->stat_processing = 1;
-    (void) ngx_atomic_fetch_add(&stats->requests, 1);
-}
-
 #if (NGX_HTTP_SSL)
 
 static ngx_int_t
@@ -4691,18 +4744,6 @@ ngx_api_http_ssl_handler(ngx_api_entry_data_t data, ngx_api_ctx_t *actx,
     }
 
     return NGX_DECLINED;
-}
-
-
-static void
-ngx_http_add_ssl_handshake_stats(ngx_ssl_conn_t *ssl_conn,
-    ngx_http_server_stats_t *stats, int num)
-{
-    (void) ngx_atomic_fetch_add(&stats->ssl_handshaked, num);
-
-    if (SSL_session_reused(ssl_conn)) {
-        (void) ngx_atomic_fetch_add(&stats->ssl_reuses, num);
-    }
 }
 
 #endif

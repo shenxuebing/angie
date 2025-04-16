@@ -5,6 +5,272 @@
 <change_log title="Angie">
 
 
+<changes ver="1.9.0" date="2025-04-11">
+
+<change type="feature">
+<para lang="ru">
+возможность задать файл в директиве "proxy_cache_path", в который между
+запусками сервера будет сохраняться содержимое зоны разделяемой памяти с
+индексом кэша; что избавляет от необходимости подгружать кэш после перезагрузки
+и позволяет практически сразу вернуть сервер в работу.
+</para>
+<para lang="en">
+the ability to specify a file in the "proxy_cache_path" directive, where the
+contents of the shared memory zone with the cache index will be saved between
+server startups; it eliminates the need to load up the cache after restart and
+allows to bring the server back online almost immediately.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+поддержка механизма TLS 1.3 Early Data (0-RTT) в stream-модуле с помощью
+директивы "ssl_early_data".
+</para>
+<para lang="en">
+support of TLS 1.3 Early Data (0-RTT) in the "stream" module using the
+"ssl_early_data" directive.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+новый статус "busy" у проксируемых серверов в API статистики, означающий,
+что число запросов на сервер достигло ограничения, заданного опцией "max_conns".
+</para>
+<para lang="en">
+new "busy" state for upstream peers in the statistics API, indicating that
+a peer has reached the limit configured by the "max_conns" option.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+параметр "uri=" в директиве "acme_hook", который позволяет переопределять
+строку запроса к внешнему приложению, в том числе, используя переменные.
+</para>
+<para lang="en">
+the "uri=" parameter in the "acme_hook" directive that allows to redefine
+the hook request URI and supports variables.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+параметр "renew_on_load" директивы "acme_client", позволяющий форсировать
+обновление сертификата при загрузке конфигурации.
+</para>
+<para lang="en">
+the "renew_on_load" parameter of the "acme_client" directive allowing
+to force renew a certificate on config load.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+отображение даты и времени сборки в поле "build_time" объекта "/status/angie"
+API статистики, а также в выводе ключа командной строки "-V".
+</para>
+<para lang="en">
+build time is now displayed via the "build_time" field of the "/status/angie"
+statistics API object and in the output of the "-V" command-line option.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+вся функциональность nginx 1.27.4, за исключением директивы
+"keepalive_min_timeout" (аналогичный функционал существует с версии 1.8.0).
+</para>
+<para lang="en">
+all functionality of nginx 1.27.4 except the "keepalive_min_timeout" directive
+(a similar feature has existed since version 1.8.0).
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+параметр "enabled=off" в директиве "acme_client" теперь отключает только
+обновление сертификата для данного клиента, но сохраняет весь остальной
+функционал; так, остается возможность использовать ключ и сертификат (при
+наличии) через переменные $acme_cert_*, а использование переменных $acme_hook_*
+и директив "acme" - не приводит к ошибкам.
+</para>
+<para lang="en">
+the "enabled=off" parameter in the "acme_client" directive now disables only
+certificate renewal for the given client while preserving all other
+functionality; the key and certificate (if available) can be accessed via the
+$acme_cert_* variables, while the use of $acme_hook_* variables and the "acme"
+directives doesn't cause errors.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+ошибка "no valid domain name defined for ACME client" теперь возникает, только
+если на ACME-клиент есть ссылка из директивы "acme" в блоке "server", но ни
+один из доменов этого сервера не соответствует требованиям ACME.
+</para>
+<para lang="en">
+the "no valid domain name defined for ACME client" error is now issued only if
+no valid (i.e. ACME-compliant) domain name is found in the "server" block that
+references an ACME client using the "acme" directive.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при сборке с поддержкой NTLS наследование директив "proxy_ssl_certificate"
+и "proxy_ssl_certificate_key" с переменными работало некорректно.
+</para>
+<para lang="en">
+if built with NTLS support, inheritance of the "proxy_ssl_certificate" and
+"proxy_ssl_certificate_key" directives with variables did not work properly.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.8.3" date="2025-04-02">
+
+<change type="bugfix">
+<para lang="ru">
+статистика "status_zone" в блоке "server" HTTP-модуля могла считаться
+некорректно, если запросы попадали в разные зоны статистики в рамках одного
+соединения или на раннем этапе обработки запроса происходила ошибка;
+проблема появилась в 1.8.2.
+</para>
+<para lang="en">
+the "status_zone" statistics in the HTTP module's "server" block could be
+miscalculated if requests within the same connection belonged to different
+statistics zones, or if an error occurred during early request processing;
+the bug had appeared in 1.8.2.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.8.2" date="2025-02-13">
+
+<change type="security">
+<para lang="ru">
+недостаточная проверка в обработке виртуальных серверов при использовании SNI
+в TLSv1.3 позволяла повторно использовать SSL-сессию в контексте другого
+виртуального сервера, чтобы обойти проверку клиентских SSL-сертификатов
+(CVE-2025-23419);
+исправление портировано из nginx 1.27.4.
+</para>
+<para lang="en">
+insufficient validation while handling virtual servers with TLSv1.3 SNI allowed
+to reuse SSL sessions in a different virtual server and thus bypass client SSL
+certificate verification (CVE-2025-23419);
+the fix was ported from nginx 1.27.4.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+запросы к API для получения значений статистики из отдельной зоны, которая была
+задана через переменные, могли приводить к зацикливанию рабочего процесса.
+</para>
+<para lang="en">
+API requests to retrieve statistic values from an individual zone, which was set
+via variables, could cause a worker process to enter an infinite loop.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+HTTP/3-запросы не учитывались в зонах статистики;
+проблема появилась в 1.8.0.
+</para>
+<para lang="en">
+HTTP/3 requests were not counted in zone statistics;
+the bug had appeared in 1.8.0.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+TLS-согласования по протоколу QUIC не учитывались в статистике по SSL.
+</para>
+<para lang="en">
+TLS handshakes using QUIC protocol were not counted in SSL statistics.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+использование доменных имён, начинающихся с точки, в директиве "server_name"
+могло привести к ошибке обновления сертификата по протоколу ACME.
+</para>
+<para lang="en">
+certificate renewal via the ACME protocol could fail for server names prefixed
+with a dot in the "server_name" directive.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.8.1" date="2024-12-28">
+
+<change type="bugfix">
+<para lang="ru">
+использование директивы "status_zone" в блоке "server" HTTP-модуля
+приводило к избыточному логированию пустых запросов в "access_log" во
+время TLS-согласований;
+проблема появилась в 1.8.0.
+</para>
+<para lang="en">
+using the "status_zone" directive in the "server" block of the HTTP module
+caused excessive logging of empty requests in "access_log" on TLS handshakes;
+the bug had appeared in 1.8.0.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+ошибки декодирования потока HTTP/3 могли приводить к падению рабочего процесса
+при закрытии QUIC-соединения;
+исправление портировано из nginx 1.27.4.
+</para>
+<para lang="en">
+decoding errors in HTTP/3 stream could cause worker process crash when closing
+QUIC connection;
+the fix was ported from nginx 1.27.4.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+отправка пакетов с согласованием версии протокола QUIC могла привести к
+бесконечному циклу обмена пакетами;
+исправление портировано из nginx 1.27.4.
+</para>
+<para lang="en">
+sending QUIC protocol version negotiation packets could cause an infinite
+packet exchange loop;
+the fix was ported from nginx 1.27.4.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+использование DNS-валидации без хуков в ACME-модуле на некоторых конфигурациях
+могло привести к падению рабочего процесса.
+</para>
+<para lang="en">
+using DNS-challenge without hooks in the ACME module could cause a worker
+process crash in some configurations.
+</para>
+</change>
+
+</changes>
+
+
 <changes ver="1.8.0" date="2024-12-19">
 
 <change type="change">
@@ -172,11 +438,11 @@ all functionality of nginx 1.27.3.
 <change type="bugfix">
 <para lang="ru">
 HTTP/3-клиенты могли отключаться по таймауту при использовании 0-RTT;
-проблема была унаследована из nginx в версии 1.7.0.
+исправление портировано из nginx 1.27.4.
 </para>
 <para lang="en">
 HTTP/3 clients could time out when using 0-RTT;
-the bug was inherited from nginx in version 1.7.0.
+the fix was ported from nginx 1.27.4.
 </para>
 </change>
 
@@ -225,10 +491,10 @@ HTTP/3 proxy settings specified in "http" or "server" level might be ignored.
 <change type="bugfix">
 <para lang="ru">
 при проксировании по протоколу HTTP/3 c включенной поддержкой NTLS директива
-"proxy_client_certificate" не работала.
+"proxy_ssl_certificate" не работала.
 </para>
 <para lang="en">
-the "proxy_client_certificate" directive didn't work when proxying via HTTP/3
+the "proxy_ssl_certificate" directive didn't work when proxying via HTTP/3
 with NTLS support enabled.
 </para>
 </change>
@@ -1092,7 +1358,7 @@ all functionality of nginx 1.25.2.
 сборка завершалась ошибкой при использовании опций ./configure
 "--without-http_upstream_zone_module"
 или "--without-stream_upstream_zone_module";
-ошибка появилась в 1.2.0.
+проблема появилась в 1.2.0.
 </para>
 <para lang="en">
 compilation failed when ./configure options

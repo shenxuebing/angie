@@ -99,7 +99,6 @@ ngx_stream_upstream_get_least_conn_peer(ngx_peer_connection_t *pc, void *data)
 {
     ngx_stream_upstream_rr_peer_data_t *rrp = data;
 
-    time_t                           now;
     uintptr_t                        m;
     ngx_int_t                        rc, total;
     ngx_int_t                        weight, best_weight, effective_weight;
@@ -115,8 +114,6 @@ ngx_stream_upstream_get_least_conn_peer(ngx_peer_connection_t *pc, void *data)
     }
 
     pc->connection = NULL;
-
-    now = ngx_time();
 
     peers = rrp->peers;
 
@@ -152,14 +149,13 @@ ngx_stream_upstream_get_least_conn_peer(ngx_peer_connection_t *pc, void *data)
             continue;
         }
 
-        if (peer->max_fails
-            && peer->fails >= peer->max_fails
-            && now - peer->checked <= peer->fail_timeout)
+        if (ngx_stream_upstream_rr_is_failed(peer)
+            && !ngx_stream_upstream_rr_is_fail_expired(peer))
         {
             continue;
         }
 
-        if (peer->max_conns && peer->conns >= peer->max_conns) {
+        if (ngx_stream_upstream_rr_is_busy(peer)) {
             continue;
         }
 
@@ -217,14 +213,13 @@ ngx_stream_upstream_get_least_conn_peer(ngx_peer_connection_t *pc, void *data)
                 continue;
             }
 
-            if (peer->max_fails
-                && peer->fails >= peer->max_fails
-                && now - peer->checked <= peer->fail_timeout)
+            if (ngx_stream_upstream_rr_is_failed(peer)
+                && !ngx_stream_upstream_rr_is_fail_expired(peer))
             {
                 continue;
             }
 
-            if (peer->max_conns && peer->conns >= peer->max_conns) {
+            if (ngx_stream_upstream_rr_is_busy(peer)) {
                 continue;
             }
 
@@ -245,33 +240,9 @@ ngx_stream_upstream_get_least_conn_peer(ngx_peer_connection_t *pc, void *data)
         }
     }
 
+    ngx_stream_upstream_use_rr_peer(pc, rrp, best, p);
+
     best->current_weight -= total;
-
-    if (now - best->checked > best->fail_timeout) {
-        best->checked = now;
-    }
-
-    pc->sockaddr = best->sockaddr;
-    pc->socklen = best->socklen;
-    pc->name = &best->name;
-#if (NGX_STREAM_UPSTREAM_SID)
-    pc->sid = best->sid;
-#endif
-
-    best->conns++;
-
-    rrp->current = best;
-    ngx_stream_upstream_rr_peer_ref(peers, best);
-
-    n = p / (8 * sizeof(uintptr_t));
-    m = (uintptr_t) 1 << p % (8 * sizeof(uintptr_t));
-
-    rrp->tried[n] |= m;
-
-#if (NGX_API && NGX_STREAM_UPSTREAM_ZONE)
-    best->stats.conns++;
-    best->stats.selected = now;
-#endif
 
     ngx_stream_upstream_rr_peers_unlock(peers);
 

@@ -291,7 +291,6 @@ typedef struct {
 
     off_t                             content_length_n;
     off_t                             content_offset;
-    time_t                            date_time;
     time_t                            last_modified_time;
 } ngx_http_headers_out_t;
 
@@ -331,10 +330,6 @@ typedef struct {
     ngx_int_t                         nbusy;
 
     ngx_chain_t                      *free;
-
-#if (NGX_API)
-    void                             *server_stats;
-#endif
 
     ngx_msec_t                        keepalive_timeout;
 
@@ -447,6 +442,10 @@ struct ngx_http_request_s {
     ngx_uint_t                        ncaptures;
     int                              *captures;
     u_char                           *captures_data;
+#endif
+
+#if (NGX_API)
+    ngx_http_server_stats_t          *server_stats;
 #endif
 
     size_t                            limit_rate;
@@ -577,7 +576,6 @@ struct ngx_http_request_s {
     unsigned                          disable_not_modified:1;
     unsigned                          stat_reading:1;
     unsigned                          stat_writing:1;
-    unsigned                          stat_processing:1;
 
     unsigned                          background:1;
     unsigned                          health_check:1;

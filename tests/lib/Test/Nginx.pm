@@ -69,6 +69,7 @@ sub DESTROY {
 
 	$self->stop();
 	$self->stop_daemons();
+	$self->stop_resolver();
 
 	if (Test::More->builder->expected_tests) {
 		local $Test::Nginx::TODO = 'alerts' unless $self->{_alerts};
@@ -420,6 +421,23 @@ sub try_run($$) {
 	return $self;
 }
 
+sub retry_run($$) {
+	my ($self, $attempts) = @_;
+
+	for my $k (1 .. $attempts) {
+		$k = $k + 1;
+		eval {
+			open OLDERR, ">&", \*STDERR; close STDERR;
+			$self->run();
+			open STDERR, ">&", \*OLDERR;
+		};
+
+		return $self unless $@;
+		print("# attempt to run #$k/$attempts failed\n");
+	}
+	return 0;
+}
+
 sub plan($) {
 	my ($self, $plan) = @_;
 
@@ -617,7 +635,7 @@ sub waitforsocket($) {
 	for (1 .. 50) {
 		my $s = IO::Socket::INET->new(
 			Proto => 'tcp',
-			PeerAddr => $peer
+			PeerAddr => $peer,
 		);
 
 		return 1 if defined $s;
@@ -626,6 +644,114 @@ sub waitforsocket($) {
 	}
 
 	return undef;
+}
+
+sub waitforsslsocket($) {
+	my ($self, $peer) = @_;
+
+	# wait for socket to accept connections
+
+	for (1 .. 50) {
+		my $s = IO::Socket::SSL->new(
+			Proto => 'tcp',
+			PeerAddr => $peer,
+			SSL_verify_mode => IO::Socket::SSL::SSL_VERIFY_NONE()
+		);
+
+		return 1 if defined $s;
+
+		select undef, undef, undef, 0.1;
+	}
+
+	return undef;
+}
+
+sub start_resolver {
+	my $self   = shift;
+	my $port   = shift;
+	my $addrs  = shift;
+	my $params = shift // {};
+
+	$self->has_daemon('dnsmasq');
+
+	# just in case
+	$self->stop_resolver();
+
+	my $conf = << "EOF";
+# listen on this port
+port=$port
+# no need for dhcp
+no-dhcp-interface=
+# do not read /etc/hosts
+no-hosts
+# do not read /etc/resolv.conf
+no-resolv
+# take records from this file
+addn-hosts=%%TESTDIR%%/test_hosts
+EOF
+
+	foreach my $nxaddr (@{ $params->{nxaddrs} // [] }) {
+		$conf .= "address=/$nxaddr/\n";
+	}
+
+	foreach my $nxserver (@{ $params->{nxservers} // [] }) {
+		$conf .= "server=/$nxserver/\n";
+	}
+
+	foreach my $srv (@{ $params->{srvs} // [] }) {
+		$conf .= "srv-host=$srv\n";
+	}
+
+	my $hosts = '';
+	while (my ($domain, $ips) = each %{ $addrs }) {
+		foreach my $ip (@{ $ips }) {
+			$hosts .= "$ip $domain\n";
+		}
+	}
+
+	# always add this to test for resolver start
+	$hosts .= "127.0.0.1 dns.example.com\n";
+
+	$self->write_file_expand('dns.conf', $conf);
+	$self->write_file('test_hosts', $hosts);
+
+	my $d = $self->testdir();
+	$self->run_daemon('dnsmasq', '-C', "$d/dns.conf", '-k',
+		"--log-facility=$d/dns.log", '-q', "--pid-file=$d/dnsmasq.pid");
+
+	my $resolver_pid = $self->{_daemons}[-1];
+
+	$self->wait_for_resolver('127.0.0.1', $port, 'dns.example.com',
+		'127.0.0.1');
+
+	# wait for pid file to appear
+	$self->waitforfile("$d/dnsmasq.pid", $resolver_pid)
+		or die "Can't start dnsmasq on port $port";
+
+	$self->{resolver} = $resolver_pid;
+}
+
+sub stop_resolver {
+	my ($self) = @_;
+
+	my $pid = $self->{resolver};
+
+	# try to find dnsmasq pid
+	if (!$pid && -e $self->testdir() . '/dnsmasq.pid') {
+		$pid = $self->read_file('dnsmasq.pid');
+		chomp $pid;
+	}
+
+	return unless $pid;
+
+	$self->_stop_pid($pid, 1);
+	undef $self->{resolver};
+}
+
+sub restart_resolver {
+	my $self = shift;
+	$self->stop_resolver();
+	$self->start_resolver(@_);
 }
 
 sub wait_for_resolver {
@@ -818,49 +944,6 @@ sub write_file_expand($$) {
 	$content =~ s/%%PORT_(\d+)_UDP%%/port($1, udp => 1)/gmse;
 
 	return $self->write_file($name, $content);
-}
-
-sub run_dnsmasq {
-	my ($self, $conf) = @_;
-	my $tdir = $self->testdir();
-
-	$self->run_daemon('dnsmasq', '-C', "$tdir/$conf", '-k',
-		"--log-facility=$tdir/dnsmasq.log",
-		'-q', "--pid-file=$tdir/dnsmasq.pid");
-}
-
-sub get_dnsmasq_pid {
-	my ($self) = @_;
-	my $tdir = $self->testdir();
-
-	for (1 .. 50) {
-		last if -e "$tdir/dnsmasq.pid";
-		select undef, undef, undef, 0.2;
-	}
-
-	return $self->read_file('dnsmasq.pid');
-}
-
-sub stop_dnsmasq {
-	my ($self) = @_;
-	my $tdir = $self->testdir();
-
-	my $pid = $self->get_dnsmasq_pid();
-
-	$self->_stop_pid($pid, 1);
-
-	# wait for dnsmasq delete .pid file
-	for (1 .. 50) {
-		last if ! -e "$tdir/dnsmasq.pid";
-		select undef, undef, undef, 0.2;
-	}
-}
-
-sub restart_dnsmasq {
-	my ($self, $conf) = @_;
-
-	$self->stop_dnsmasq();
-	$self->run_dnsmasq($conf);
 }
 
 sub run_daemon($;@) {

@@ -1,45 +1,46 @@
 #!/usr/bin/perl
 
-# (C) 2023 Web Server LLC
+# (C) 2024 Web Server LLC
+# (C) Sergey Kandaurov
+# (C) Nginx, Inc.
 
-# Tests for upstream re-resolve.
+# Tests for dynamic upstream configuration with re-resolvable servers.
+# Ensure that dns updates are properly applied.
 
 ###############################################################################
 
 use warnings;
 use strict;
 
-use Test::Most;
+use Test::More;
+
+use IO::Select;
 
 BEGIN { use FindBin; chdir($FindBin::Bin); }
 
 use lib 'lib';
-use Test::Nginx qw/http_start port http_get http_end/;
-use Test::Utils qw/get_json/;
+use Test::Nginx;
 
 ###############################################################################
 
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-# the test depends on availability of 127.0.0.0/8 subnet on targets
-plan(skip_all => 'OS is not linux') if $^O ne 'linux';
+my $t = Test::Nginx->new()->has(qw/http proxy upstream_zone/);
 
-my $t = Test::Nginx->new()
-	->has(qw/http http_api proxy upstream_zone --with-debug/)
-	->has_daemon("dnsmasq");
+$t->skip_errors_check('crit',
+	qr/connect\(\) to \[fe80::1\]:\d{4,} failed/,
+	qr/connect\(\) to \[fe80::2\]:\d{4,} failed/
+);
 
-# see https://trac.nginx.org/nginx/ticket/1831
-plan(skip_all => "perl >= 5.32 required")
-	if ($t->has_module('perl') && $] < 5.032000);
+$t->skip_errors_check('crit', "Can't assign requested address")
+	if $^O eq 'freebsd';
 
-$t->plan(16)->write_file_expand('nginx.conf', <<'EOF');
+$t->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
 
 daemon off;
-# to (possibly) improve coverage a bit
-worker_processes 4;
 
 events {
 }
@@ -49,358 +50,327 @@ http {
 
     upstream u {
         zone z 1m;
-        server foo.example.com:%%PORT_8081%% resolve;
-        server bar.example.com:%%PORT_8082%% resolve;
-        server backup.example.com:%%PORT_8081%% resolve backup;
-        server nonexist.example.com:%%PORT_8081%% resolve backup;
-
-        resolver 127.0.0.1:5353 valid=1s ipv6=off;
+        server example.net:%%PORT_8080%% resolve max_fails=0;
     }
 
-    upstream u2 {
-        zone z 1m;
-        server baz.example.com:%%PORT_8081%% resolve;
-
-        resolver 127.0.0.1:5353 valid=1s ipv6=off;
-        resolver_timeout 1s;
-    }
-
-
-    # verify tries - multiple servers
-    upstream u3 {
-        zone z 1m;
-
-        server multi.example.com:%%PORT_8081%% resolve;
-
-        resolver 127.0.0.1:5353 valid=1s ipv6=off;
-        resolver_timeout 1s;
-    }
-
-    # verify tries - regular servers
-    upstream u4 {
-        zone z 1m;
-
-        server bar.example.com:%%PORT_8081%% resolve;
-        server qux.example.com:%%PORT_8081%% resolve;
-
-        resolver 127.0.0.1:5353 valid=1s ipv6=off;
-        resolver_timeout 1s;
-    }
+    # lower the retry timeout after empty reply
+    resolver 127.0.0.1:%%PORT_8982_UDP%% valid=1s;
+    # retry query shortly after DNS is started
+    resolver_timeout 1s;
 
     server {
-        listen       127.0.0.2:%%PORT_8081%%;
-
-        location / {
-            return 404;
-        }
-    }
-
-    server {
-        listen       127.0.0.6:%%PORT_8081%%;
-
-        location / {
-            return 200 "goodreply";
-        }
-    }
-
-    server {
-        listen       127.0.0.1:%%PORT_8080%%;
+        listen       127.0.0.1:8080;
+        listen       [::1]:%%PORT_8080%%;
         server_name  localhost;
 
         location / {
-            proxy_pass http://u;
+            proxy_pass http://u/t;
+            proxy_connect_timeout 50ms;
+            add_header X-IP $upstream_addr;
+            error_page 502 504 redirect;
         }
 
-        location /u2 {
-            proxy_pass http://u2/;
+        location /2 {
+            proxy_pass http://u/t;
+            add_header X-IP $upstream_addr;
         }
 
-        location /u3 {
-            add_header  "X-Upstream-Status" "US=$upstream_status";
-            proxy_next_upstream http_404;
-            proxy_pass http://u3/;
-        }
-
-        location /u4 {
-            add_header  "X-Upstream-Status" "US=$upstream_status";
-            proxy_next_upstream http_404;
-            proxy_pass http://u4/;
-        }
-
-        location /api/ {
-            api /;
-        }
-    }
-
-    # backends
-    server {
-        error_log backend1.log debug;
-        listen 127.0.0.1:%%PORT_8081%%;
-        listen 127.0.0.5:%%PORT_8081%%;
-        location / { return 200 "B1"; }
-        location /slow {
-            limit_rate 40;
-            return 200 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        }
-    }
-    server {
-        error_log backend2.log debug;
-        listen 127.0.0.1:%%PORT_8082%%;
-        location / { return 200 "B2"; }
+        location /t { }
     }
 }
 
 EOF
 
-my $tdir = $t->testdir();
+port(8083);
 
-# TODO: use substituted ports for parallel execution for DNS server
-$t->write_file_expand('dns.conf', <<'EOF');
-# listen on this port
-port=5353
-# no need for dhcp
-no-dhcp-interface=
-# do not read /etc/hosts
-no-hosts
-# do not read /etc/resolv.conf
-no-resolv
-# take records from this file
-addn-hosts=%%TESTDIR%%/test_hosts
-EOF
+$t->write_file('t', '');
 
-$t->write_file_expand('dns2.conf', <<'EOF');
-# listen on this port
-port=5353
-# no need for dhcp
-no-dhcp-interface=
-# do not read /etc/hosts
-no-hosts
-# do not read /etc/resolv.conf
-no-resolv
-# take records from this file
-addn-hosts=%%TESTDIR%%/test_hosts2
-# return NXDOMAIN for this
-address=/backup.example.com/
-EOF
-
-$t->write_file_expand('dns3.conf', <<'EOF');
-# listen on this port
-port=5353
-# no need for dhcp
-no-dhcp-interface=
-# return NXDOMAIN instead of REFUSED when name is not found
-server=/example.com/
-# do not read /etc/hosts
-no-hosts
-# do not read /etc/resolv.conf
-no-resolv
-# take records from this file
-addn-hosts=%%TESTDIR%%/test_hosts3
-# return NXDOMAIN for this
-address=/backup.example.com/
-EOF
-
-
-# ipv6 entries are stubs for resolver
-$t->write_file_expand('test_hosts', <<'EOF');
-127.0.0.1  foo.example.com
-127.0.0.2  bar.example.com
-127.0.0.3  backup.example.com
-127.0.0.4  backup.example.com
-127.0.0.5  baz.example.com
-127.0.0.6  qux.example.com
-::1 foo.example.com
-::1 bar.example.com
-::1 backup.example.com
-::1 baz.example.com
-127.0.0.2  multi.example.com
-127.0.0.6  multi.example.com
-EOF
-
-$t->write_file_expand('test_hosts2', <<'EOF');
-127.0.0.3  foo.example.com
-127.0.0.4  bar.example.com
-127.0.0.5  baz.example.com
-::1 foo.example.com
-::1 bar.example.com
-::1 baz.example.com
-EOF
-
-$t->write_file_expand('test_hosts3', <<'EOF');
-127.0.0.3  foo.example.com
-127.0.0.4  bar.example.com
-::1 foo.example.com
-::1 bar.example.com
-EOF
-
-my $dconf = $t->testdir()."/dns.conf";
-
-$t->run_daemon('dnsmasq', '-C', "$tdir/dns.conf", '-k',
-	"--log-facility=$tdir/dns.log", '-q');
-
-$t->wait_for_resolver('127.0.0.1', 5353, 'foo.example.com', '127.0.0.1');
-
-$t->run();
+$t->run_daemon(\&dns_daemon, $t)->waitforfile($t->testdir . '/' . port(8982));
+$t->try_run('no resolve in upstream server')->plan(18);
 
 ###############################################################################
 
-my ($port1, $port2) = (port(8081), port(8082));
+my ($r, @n);
+my $p0 = port(8080);
 
-# wait for nginx resolver to complete query
-for (1 .. 50) {
-	last if http_get('/') =~ qr /200 OK/;
-	select undef, undef, undef, 0.1;
+update_name({A => '127.0.0.201'});
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 1, 'A');
+like($r, qr/127.0.0.201:$p0/, 'A 1');
+
+# A changed
+
+update_name({A => '127.0.0.202'});
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 1, 'A changed');
+like($r, qr/127.0.0.202:$p0/, 'A changed 1');
+
+# 1 more A added
+
+update_name({A => '127.0.0.201 127.0.0.202'});
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 2, 'A A');
+like($r, qr/127.0.0.201:$p0/, 'A A 1');
+like($r, qr/127.0.0.202:$p0/, 'A A 2');
+
+# 1 A removed, 2 AAAA added
+
+update_name({A => '127.0.0.201', AAAA => 'fe80::1 fe80::2'});
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 3, 'A AAAA AAAA responses');
+like($r, qr/127.0.0.201:$p0/, 'A AAAA AAAA 1');
+like($r, qr/\[fe80::1\]:$p0/, 'A AAAA AAAA 2');
+like($r, qr/\[fe80::1\]:$p0/, 'A AAAA AAAA 3');
+
+# all records removed
+
+update_name();
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 0, 'empty response');
+
+# A added after empty
+
+update_name({A => '127.0.0.201'});
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 1, 'A added');
+like($r, qr/127.0.0.201:$p0/, 'A added 1');
+
+# changed to CNAME
+
+update_name({CNAME => 'alias'}, 4);
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 1, 'CNAME');
+like($r, qr/127.0.0.203:$p0/, 'CNAME 1');
+
+# bad DNS reply should not affect existing upstream configuration
+
+update_name({ERROR => 'SERVFAIL'});
+$r = http_get('/');
+is(@n = $r =~ /:$p0/g, 1, 'ERROR');
+like($r, qr/127.0.0.203:$p0/, 'ERROR 1');
+update_name({A => '127.0.0.1'});
+
+###############################################################################
+
+sub update_name {
+	my ($name, $plan) = @_;
+
+	$plan = 2 if !defined $plan;
+
+	sub sock {
+		IO::Socket::INET->new(
+			Proto => 'tcp',
+			PeerAddr => '127.0.0.1:' . port(8083)
+		)
+			or die "Can't connect to nginx: $!\n";
+	}
+
+	$name->{A} = '' unless $name->{A};
+	$name->{AAAA} = '' unless $name->{AAAA};
+	$name->{CNAME} = '' unless $name->{CNAME};
+	$name->{ERROR} = '' unless $name->{ERROR};
+
+	my $req =<<EOF;
+GET / HTTP/1.0
+Host: localhost
+X-A: $name->{A}
+X-AAAA: $name->{AAAA}
+X-CNAME: $name->{CNAME}
+X-ERROR: $name->{ERROR}
+
+EOF
+
+	my ($gen) = http($req, socket => sock()) =~ /X-Gen: (\d+)/;
+	for (1 .. 10) {
+		my ($gen2) = http($req, socket => sock()) =~ /X-Gen: (\d+)/;
+
+		# let resolver cache expire to finish upstream reconfiguration
+		select undef, undef, undef, 0.5;
+		last unless ($gen + $plan > $gen2);
+	}
 }
 
-# expect that upstream contains addresses from 'test_hosts' file
+###############################################################################
 
-my $j = get_json("/api/status/http/upstreams/u/peers/127.0.0.1:$port1");
-is($j->{server}, 'foo.example.com:' . $port1, 'foo.example.com is resolved');
+sub reply_handler {
+	my ($recv_data, $h) = @_;
 
-$j = get_json("/api/status/http/upstreams/u/peers/127.0.0.2:$port2");
-is($j->{server}, 'bar.example.com:' . $port2, 'bar.example.com resolved');
+	my (@name, @rdata);
 
-$j = get_json("/api/status/http/upstreams/u/peers/127.0.0.3:$port1");
-is($j->{server}, 'backup.example.com:' . $port1,
-	'backup.example.com addr 1 resolved');
+	use constant NOERROR	=> 0;
+	use constant SERVFAIL	=> 2;
+	use constant NXDOMAIN	=> 3;
 
-$j = get_json("/api/status/http/upstreams/u/peers/127.0.0.4:$port1");
-is($j->{server}, 'backup.example.com:' . $port1,
-	'backup.example.com addr 2 resolved');
+	use constant A		=> 1;
+	use constant CNAME	=> 5;
+	use constant AAAA	=> 28;
+	use constant DNAME	=> 39;
+	use constant IN		=> 1;
 
-# verify tries - multiple
-# u3: multi.example.com:8081
-#       127.0.0.2	404
-#       127.0.0.6	200
-my $upstream_status_re = qr/X-Upstream-Status: US=([^\n\r]+)/;
-my ($upstream_status_1) = http_get("/u3") =~ $upstream_status_re;
-my ($upstream_status_2) = http_get("/u3") =~ $upstream_status_re;
+	# default values
 
-# the order is not significant
-cmp_bag(
-	[$upstream_status_1, $upstream_status_2], ['404, 200', '200'],
-	'multiple - request 1 and 2'
-);
+	my ($hdr, $rcode, $ttl) = (0x8180, NOERROR, 1);
+	$h = {A => [ "127.0.0.201" ]} unless defined $h;
 
-# verify tries - regular
-# u4: bar.example.com:8081
-#       127.0.0.2	404
-#     qux.example.com:8081
-#       127.0.0.6	200
-($upstream_status_1) = http_get("/u4") =~ $upstream_status_re;
-($upstream_status_2) = http_get("/u4") =~ $upstream_status_re;
+	# decode name
 
-# the order is not significant
-cmp_bag(
-	[$upstream_status_1, $upstream_status_2], ['404, 200', '200'],
-	'regular - request 1 and 2'
-);
+	my ($len, $offset) = (undef, 12);
+	while (1) {
+		$len = unpack("\@$offset C", $recv_data);
+		last if $len == 0;
+		$offset++;
+		push @name, unpack("\@$offset A$len", $recv_data);
+		$offset += $len;
+	}
 
-# perform reload to trigger the codepath for pre-resolve
-$t->reload('/api/status/angie/generation');
+	$offset -= 1;
+	my ($id, $type, $class) = unpack("n x$offset n2", $recv_data);
+	my $name = join('.', @name);
 
-# no need to wait for resolver, we expect cached result
+	if ($h->{ERROR}) {
+		$rcode = SERVFAIL;
+		goto bad;
+	}
 
-$j = get_json("/api/status/http/upstreams/u/peers/");
-is($j->{"127.0.0.1:$port1"}{server}, "foo.example.com:$port1",
-	'foo.example.com is found after reload');
-is($j->{"127.0.0.2:$port2"}{server}, "bar.example.com:$port2",
-	'bar.example.com is found after reload');
+	if ($name eq 'example.net') {
+		if ($type == A && $h->{A}) {
+			map { push @rdata, rd_addr($ttl, $_) } @{$h->{A}};
+		}
+		if ($type == AAAA && $h->{AAAA}) {
+			map { push @rdata, rd_addr6($ttl, $_) } @{$h->{AAAA}};
+		}
+		my $cname = defined $h->{CNAME} ? $h->{CNAME} : 0;
+		if ($cname) {
+			push @rdata, pack("n3N nCa5n", 0xc00c, CNAME, IN, $ttl,
+				8, 5, $cname, 0xc00c);
+		}
 
+	} elsif ($name eq 'alias.example.net') {
+		if ($type == A) {
+			push @rdata, rd_addr($ttl, '127.0.0.203');
+		}
+	}
 
-# now stop DNS daemon to prevent resolving, reload nginx
-# and verify upstreams are still accessible
+bad:
 
-$t->stop_daemons();
-$t->reload('/api/status/angie/generation');
+	Test::Nginx::log_core('||', "DNS: $name $type $rcode");
 
-$j = get_json("/api/status/http/upstreams/u/peers/");
-is($j->{"127.0.0.1:$port1"}{server}, "foo.example.com:$port1",
-	'foo.example.com is saved');
-is($j->{"127.0.0.2:$port2"}{server}, "bar.example.com:$port2",
-	'bar.example.com is saved');
+	$len = @name;
+	pack("n6 (C/a*)$len x n2", $id, $hdr | $rcode, 1, scalar @rdata,
+		0, 0, @name, $type, $class) . join('', @rdata);
+}
 
+sub rd_addr {
+	my ($ttl, $addr) = @_;
 
-# start DNS server with new config, addresses changed
-$t->run_daemon('dnsmasq', '-C', "$tdir/dns2.conf", '-k',
-	"--log-facility=$tdir/dns.log", '-q');
-$t->wait_for_resolver('127.0.0.1', 5353, 'foo.example.com', '127.0.0.3');
+	my $code = 'split(/\./, $addr)';
 
-# reload nginx to force resolve
-$t->reload('/api/status/angie/generation');
+	pack 'n3N nC4', 0xc00c, A, IN, $ttl, eval "scalar $code", eval($code);
+}
 
-# wait 3 seconds to ensure re-resolve (valid=1s)
-select undef, undef, undef, 3;
+sub expand_ip6 {
+	my ($addr) = @_;
 
-# expect 127.0.0.3 is now foo instead of 'backup'
-$j = get_json("/api/status/http/upstreams/u/peers/");
-is($j->{"127.0.0.3:$port1"}{server}, "foo.example.com:$port1",
-	'foo.example.com is new');
-is($j->{"127.0.0.4:$port2"}{server}, "bar.example.com:$port2",
-	'bar.example.com is new');
+	substr ($addr, index($addr, "::"), 2) =
+		join "0", map { ":" } (0 .. 8 - (split /:/, $addr) + 1);
+	map { hex "0" x (4 - length $_) . "$_" } split /:/, $addr;
+}
 
+sub rd_addr6 {
+	my ($ttl, $addr) = @_;
 
-# Trigger zombies paths and test for debug refcount
+	pack 'n3N nn8', 0xc00c, AAAA, IN, $ttl, 16, expand_ip6($addr);
+}
 
-# 1) start 2 long requests  (backend is baz.example.com)
+sub dns_daemon {
+	my ($t) = @_;
+	my ($data, $recv_data, $h);
 
-$j = get_json("/api/status/http/upstreams/u2/peers/");
-is($j->{"127.0.0.5:$port1"}{server}, 'baz.example.com:' . $port1,
-	'baz in u2 is ok');
+	my $socket = IO::Socket::INET->new(
+		LocalAddr => '127.0.0.1',
+		LocalPort => port(8982),
+		Proto=> 'udp',
+	)
+		or die "Can't create listening socket: $!\n";
 
+	my $control = IO::Socket::INET->new(
+		Proto => 'tcp',
+		LocalHost => "127.0.0.1:" . port(8083),
+		Listen => 5,
+		Reuse => 1
+	)
+		or die "Can't create listening socket: $!\n";
 
-my $s = IO::Socket::INET->new(
-	Proto    => 'tcp',
-	PeerAddr => '127.0.0.1',
-	PeerPort => port(8080)
-)
-	or die "cannot create socket: $!\n";
+	my $sel = IO::Select->new($socket, $control);
 
-http_start(<<EOF, socket => $s);
-GET /u2/slow HTTP/1.0
-Host: localhost
+	local $SIG{PIPE} = 'IGNORE';
 
+	# signal we are ready
+
+	open my $fh, '>', $t->testdir() . '/' . port(8982);
+	close $fh;
+	my $cnt = 0;
+
+	while (my @ready = $sel->can_read) {
+		foreach my $fh (@ready) {
+			if ($control == $fh) {
+				my $new = $fh->accept;
+				$new->autoflush(1);
+				$sel->add($new);
+
+			} elsif ($socket == $fh) {
+				$fh->recv($recv_data, 65536);
+				$data = reply_handler($recv_data, $h);
+				$fh->send($data);
+				$cnt++;
+
+			} else {
+				$h = process_name($fh, $cnt);
+				$sel->remove($fh);
+				$fh->close;
+			}
+		}
+	}
+}
+
+# parse dns update
+
+sub process_name {
+	my ($client, $cnt) = @_;
+	my $port = $client->sockport();
+
+	my $headers = '';
+	my $uri = '';
+	my %h;
+
+	while (<$client>) {
+		$headers .= $_;
+		last if (/^\x0d?\x0a?$/);
+	}
+	return 1 if $headers eq '';
+
+	$uri = $1 if $headers =~ /^\S+\s+([^ ]+)\s+HTTP/i;
+	return 1 if $uri eq '';
+
+	$headers =~ /X-A: (.*)$/m;
+	map { push @{$h{A}}, $_ } split(/ /, $1);
+	$headers =~ /X-AAAA: (.*)$/m;
+	map { push @{$h{AAAA}}, $_ } split(/ /, $1);
+	$headers =~ /X-CNAME: (.*)$/m;
+	$h{CNAME} = $1;
+	$headers =~ /X-ERROR: (.*)$/m;
+	$h{ERROR} = $1;
+
+	Test::Nginx::log_core('||', "$port: response, 200");
+	print $client <<EOF;
+HTTP/1.1 200 OK
+Connection: close
+X-Gen: $cnt
+
+OK
 EOF
-my $s2 = IO::Socket::INET->new(
-	Proto    => 'tcp',
-	PeerAddr => '127.0.0.1',
-	PeerPort => port(8080)
-)
-	or die "cannot create socket: $!\n";
 
-http_start(<<EOF, socket => $s2);
-GET /u2/slow HTTP/1.0
-Host: localhost
-
-EOF
-
-# 2) wait for angie to connect to backends
-select undef, undef, undef, 1;
-
-$j = get_json("/api/status/http/upstreams/u2/peers/127.0.0.5:$port1");
-is($j->{'refs'}, 2, "2 long requests to backend started, ref");
-
-# 3) now delete corresponding DNS records:
-#	- stop the DNS server
-#	- restart it with new config without baz.example.com
-
-$t->stop_daemons();
-
-# start DNS server with new config, addresses changed
-$t->run_daemon('dnsmasq', '-C', "$tdir/dns3.conf", '-k',
-	"--log-facility=$tdir/dns.log", '-q');
-$t->wait_for_resolver('127.0.0.1', 5353, 'foo.example.com', '127.0.0.3');
-
-# 4) wait for resolve timer to occure (resolver_timeout is 1s for u2)
-select undef, undef, undef, 2;
-
-$j = get_json("/api/status/http/upstreams/u2/zombies");
-is($j, 1, "zombie found after name resolver dropped used peer");
-
-http_end($s);
-http_end($s2);
-
-$j = get_json("/api/status/http/upstreams/u2/peers/127.0.0.5:$port1");
-is($j->{error}, 'PathNotFound', "peer is deleted after resolve");
+	return \%h;
+}
 
 ###############################################################################

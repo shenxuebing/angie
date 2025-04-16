@@ -168,6 +168,16 @@ ngx_int_t ngx_api_http_upstream_peer_struct_int64_handler(
 #endif
 
 
+#define ngx_http_upstream_rr_is_failed(peer)                                  \
+    (peer->max_fails && peer->fails >= peer->max_fails)
+
+#define ngx_http_upstream_rr_is_fail_expired(peer)                            \
+    (ngx_time() - peer->checked > peer->fail_timeout)
+
+#define ngx_http_upstream_rr_is_busy(peer)                                    \
+    (peer->max_conns && peer->conns >= peer->max_conns)
+
+
 #if (NGX_HTTP_UPSTREAM_ZONE)
 
 #define ngx_http_upstream_rr_peers_rlock(peers)                               \
@@ -306,6 +316,9 @@ ngx_int_t ngx_http_upstream_create_round_robin_peer(ngx_http_request_t *r,
     ngx_http_upstream_resolved_t *ur);
 ngx_int_t ngx_http_upstream_get_round_robin_peer(ngx_peer_connection_t *pc,
     void *data);
+void ngx_http_upstream_use_rr_peer(ngx_peer_connection_t *pc,
+    ngx_http_upstream_rr_peer_data_t *rrp, ngx_http_upstream_rr_peer_t *peer,
+    ngx_uint_t index);
 void ngx_http_upstream_free_round_robin_peer(ngx_peer_connection_t *pc,
     void *data, ngx_uint_t state);
 

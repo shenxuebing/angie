@@ -25,7 +25,7 @@ static ngx_inline ngx_int_t ngx_stream_upstream_set_round_robin_peer(
     ngx_pool_t *pool, ngx_stream_upstream_rr_peer_t *peer, ngx_addr_t *addr,
     ngx_stream_upstream_server_t *server);
 static ngx_stream_upstream_rr_peer_t *ngx_stream_upstream_get_peer(
-    ngx_stream_upstream_rr_peer_data_t *rrp);
+    ngx_stream_upstream_rr_peer_data_t *rrp, ngx_uint_t *tot, ngx_uint_t *idx);
 static void ngx_stream_upstream_notify_round_robin_peer(
     ngx_peer_connection_t *pc, void *data, ngx_uint_t type);
 #if (NGX_API && NGX_STREAM_UPSTREAM_ZONE)
@@ -597,12 +597,16 @@ ngx_stream_upstream_get_round_robin_peer(ngx_peer_connection_t *pc, void *data)
     ngx_stream_upstream_rr_peer_data_t *rrp = data;
 
     ngx_int_t                        rc;
-    ngx_uint_t                       i, n;
+    ngx_uint_t                       i, n, total;
     ngx_stream_upstream_rr_peer_t   *peer;
     ngx_stream_upstream_rr_peers_t  *peers;
 
     ngx_log_debug1(NGX_LOG_DEBUG_STREAM, pc->log, 0,
                    "get rr peer, try: %ui", pc->tries);
+
+#if (NGX_SUPPRESS_WARN)
+    total = 0;
+#endif
 
     pc->connection = NULL;
 
@@ -615,6 +619,8 @@ ngx_stream_upstream_get_round_robin_peer(ngx_peer_connection_t *pc, void *data)
     }
 #endif
 
+    i = 0;
+
     if (peers->single) {
         peer = peers->peer;
 
@@ -622,20 +628,17 @@ ngx_stream_upstream_get_round_robin_peer(ngx_peer_connection_t *pc, void *data)
             goto failed;
         }
 
-        if (peer->max_conns && peer->conns >= peer->max_conns) {
+        if (ngx_stream_upstream_rr_is_busy(peer)) {
             goto failed;
         }
 
         peer->checked = ngx_time();
 
-        rrp->current = peer;
-        ngx_stream_upstream_rr_peer_ref(peers, peer);
-
     } else {
 
         /* there are several peers */
 
-        peer = ngx_stream_upstream_get_peer(rrp);
+        peer = ngx_stream_upstream_get_peer(rrp, &total, &i);
 
         if (peer == NULL) {
             goto failed;
@@ -644,21 +647,11 @@ ngx_stream_upstream_get_round_robin_peer(ngx_peer_connection_t *pc, void *data)
         ngx_log_debug2(NGX_LOG_DEBUG_STREAM, pc->log, 0,
                        "get rr peer, current: %p %i",
                        peer, peer->current_weight);
+
+        peer->current_weight -= total;
     }
 
-    pc->sockaddr = peer->sockaddr;
-    pc->socklen = peer->socklen;
-    pc->name = &peer->name;
-#if (NGX_STREAM_UPSTREAM_SID)
-    pc->sid = peer->sid;
-#endif
-
-    peer->conns++;
-
-#if (NGX_API && NGX_STREAM_UPSTREAM_ZONE)
-    peer->stats.conns++;
-    peer->stats.selected = ngx_time();
-#endif
+    ngx_stream_upstream_use_rr_peer(pc, rrp, peer, i);
 
     ngx_stream_upstream_rr_peers_unlock(peers);
 
@@ -709,15 +702,13 @@ busy:
 
 
 static ngx_stream_upstream_rr_peer_t *
-ngx_stream_upstream_get_peer(ngx_stream_upstream_rr_peer_data_t *rrp)
+ngx_stream_upstream_get_peer(ngx_stream_upstream_rr_peer_data_t *rrp,
+    ngx_uint_t *tot, ngx_uint_t *idx)
 {
-    time_t                          now;
     uintptr_t                       m;
     ngx_int_t                       total, effective_weight;
     ngx_uint_t                      i, n, p;
     ngx_stream_upstream_rr_peer_t  *peer, *best;
-
-    now = ngx_time();
 
     best = NULL;
     total = 0;
@@ -741,14 +732,13 @@ ngx_stream_upstream_get_peer(ngx_stream_upstream_rr_peer_data_t *rrp)
             continue;
         }
 
-        if (peer->max_fails
-            && peer->fails >= peer->max_fails
-            && now - peer->checked <= peer->fail_timeout)
+        if (ngx_stream_upstream_rr_is_failed(peer)
+            && !ngx_stream_upstream_rr_is_fail_expired(peer))
         {
             continue;
         }
 
-        if (peer->max_conns && peer->conns >= peer->max_conns) {
+        if (ngx_stream_upstream_rr_is_busy(peer)) {
             continue;
         }
 
@@ -772,21 +762,50 @@ ngx_stream_upstream_get_peer(ngx_stream_upstream_rr_peer_data_t *rrp)
         return NULL;
     }
 
-    rrp->current = best;
-    ngx_stream_upstream_rr_peer_ref(rrp->peers, best);
+    *tot = total;
+    *idx = p;
 
-    n = p / (8 * sizeof(uintptr_t));
-    m = (uintptr_t) 1 << p % (8 * sizeof(uintptr_t));
+    return best;
+}
+
+
+void
+ngx_stream_upstream_use_rr_peer(ngx_peer_connection_t *pc,
+    ngx_stream_upstream_rr_peer_data_t *rrp,
+    ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t index)
+{
+    time_t      now;
+    uintptr_t   m;
+    ngx_uint_t  n;
+
+    rrp->current = peer;
+
+    ngx_stream_upstream_rr_peer_ref(rrp->peers, peer);
+
+    now = ngx_time();
+
+    if (now - peer->checked > peer->fail_timeout) {
+        peer->checked = now;
+    }
+
+    peer->conns++;
+
+#if (NGX_API && NGX_STREAM_UPSTREAM_ZONE)
+    peer->stats.conns++;
+    peer->stats.selected = now;
+#endif
+
+    n = index / (8 * sizeof(uintptr_t));
+    m = (uintptr_t) 1 << index % (8 * sizeof(uintptr_t));
 
     rrp->tried[n] |= m;
 
-    best->current_weight -= total;
-
-    if (now - best->checked > best->fail_timeout) {
-        best->checked = now;
-    }
-
-    return best;
+    pc->sockaddr = peer->sockaddr;
+    pc->socklen = peer->socklen;
+    pc->name = &peer->name;
+#if (NGX_STREAM_UPSTREAM_SID)
+    pc->sid = peer->sid;
+#endif
 }
 
 
@@ -852,7 +871,7 @@ ngx_stream_upstream_free_round_robin_peer(ngx_peer_connection_t *pc, void *data,
         if (peer->accessed < peer->checked) {
 
             if (peer->slow_start
-                && peer->max_fails && peer->fails >= peer->max_fails)
+                && ngx_stream_upstream_rr_is_failed(peer))
             {
                 peer->slow_time = ngx_current_msec;
             }
@@ -898,7 +917,7 @@ ngx_stream_upstream_notify_round_robin_peer(ngx_peer_connection_t *pc,
         if (peer->accessed < peer->checked) {
 
             if (peer->slow_start
-                && peer->max_fails && peer->fails >= peer->max_fails)
+                && ngx_stream_upstream_rr_is_failed(peer))
             {
                 peer->slow_time = ngx_current_msec;
             }
