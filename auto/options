@@ -107,6 +107,7 @@ HTTP_MP4=NO
 HTTP_GUNZIP=NO
 HTTP_GZIP_STATIC=NO
 HTTP_ACME=NO
+HTTP_CLIENT=NO
 HTTP_UPSTREAM_HASH=YES
 HTTP_UPSTREAM_IP_HASH=YES
 HTTP_UPSTREAM_LEAST_CONN=YES
@@ -114,6 +115,7 @@ HTTP_UPSTREAM_RANDOM=YES
 HTTP_UPSTREAM_KEEPALIVE=YES
 HTTP_UPSTREAM_ZONE=YES
 HTTP_UPSTREAM_STICKY=YES
+HTTP_DOCKER=YES
 
 # STUB
 HTTP_STUB_STATUS=NO
@@ -126,6 +128,7 @@ MAIL_SMTP=YES
 
 STREAM=NO
 STREAM_SSL=NO
+STREAM_ACME=NO
 STREAM_REALIP=NO
 STREAM_LIMIT_CONN=YES
 STREAM_ACCESS=YES
@@ -158,6 +161,8 @@ USE_JSON=NO
 USE_API=NO
 
 USE_NTLS=NO
+
+USE_DOCKER=NO
 
 NGX_COMPAT=NO
 
@@ -284,6 +289,7 @@ $0: warning: the \"--with-ipv6\" option is deprecated"
         --with-http_slice_module)        HTTP_SLICE=YES             ;;
         --with-http_acme_module)         HTTP_ACME=YES              ;;
 
+        --without-http_docker_module)    HTTP_DOCKER=NO             ;;
         --without-http_charset_module)   HTTP_CHARSET=NO            ;;
         --without-http_gzip_module)      HTTP_GZIP=NO               ;;
         --without-http_ssi_module)       HTTP_SSI=NO                ;;
@@ -350,6 +356,7 @@ use the \"--with-mail_ssl_module\" option instead"
         --with-stream)                   STREAM=YES                 ;;
         --with-stream=dynamic)           STREAM=DYNAMIC             ;;
         --with-stream_ssl_module)        STREAM_SSL=YES             ;;
+        --with-stream_acme_module)       STREAM_ACME=YES            ;;
         --with-stream_realip_module)     STREAM_REALIP=YES          ;;
         --with-stream_geoip_module)      STREAM_GEOIP=YES           ;;
         --with-stream_geoip_module=dynamic)
@@ -520,6 +527,7 @@ cat << END
   --with-http_stub_status_module     enable ngx_http_stub_status_module
   --with-http_acme_module            enable ngx_http_acme_module
 
+  --without-http_docker_module       disable ngx_http_docker_module
   --without-http_charset_module      disable ngx_http_charset_module
   --without-http_gzip_module         disable ngx_http_gzip_module
   --without-http_ssi_module          disable ngx_http_ssi_module
@@ -592,6 +600,7 @@ cat << END
   --with-stream                      enable TCP/UDP proxy module
   --with-stream=dynamic              enable dynamic TCP/UDP proxy module
   --with-stream_ssl_module           enable ngx_stream_ssl_module
+  --with-stream_acme_module          enable ngx_stream_acme_module
   --with-stream_realip_module        enable ngx_stream_realip_module
   --with-stream_geoip_module         enable ngx_stream_geoip_module
   --with-stream_geoip_module=dynamic enable dynamic ngx_stream_geoip_module

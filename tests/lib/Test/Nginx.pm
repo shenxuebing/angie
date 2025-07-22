@@ -10,15 +10,17 @@ package Test::Nginx;
 use warnings;
 use strict;
 
-use base qw/ Exporter /;
+use Exporter qw/ import /;
 
-our @EXPORT = qw/ log_in log_out http http_get http_head port /;
-our @EXPORT_OK = qw/
-	http_gzip_request http_gzip_like http_start http_end http_content
-/;
-our %EXPORT_TAGS = (
-	gzip => [ qw/ http_gzip_request http_gzip_like / ]
-);
+BEGIN {
+	our @EXPORT = qw/ log_in log_out http http_get http_head port /;
+	our @EXPORT_OK = qw/
+		http_gzip_request http_gzip_like http_start http_end http_content
+	/;
+	our %EXPORT_TAGS = (
+		gzip => [ qw/ http_gzip_request http_gzip_like / ]
+	);
+}
 
 ###############################################################################
 
@@ -31,9 +33,8 @@ use POSIX qw/ waitpid WNOHANG /;
 use Socket qw/ CRLF /;
 use Test::More qw//;
 
-# we can't use 'use' here because of circular dependencies
-require Test::API;
-Test::API->import(qw/ api_status traverse_api_status /);
+use Test::Nginx::Config;
+use Test::API qw/ api_status traverse_api_status /;
 
 ###############################################################################
 
@@ -129,8 +130,7 @@ sub DESTROY {
 	}
 
 	if (Test::More->builder->expected_tests && $ENV{TEST_ANGIE_VALGRIND}) {
-		my $errors = $self->read_file('valgrind.log');
-		$errors = join "\n", $errors =~ /^==\d+== .+/gm;
+		my $errors = $self->grep_file('valgrind.log', /^==\d+== .+/m);
 		Test::More::is($errors, '', 'no valgrind errors');
 	}
 
@@ -179,6 +179,7 @@ sub has_module($) {
 		realip	=> '--with-http_realip_module',
 		sub	=> '--with-http_sub_module',
 		acme	=> '--with-http_acme_module',
+		debug   => '--with-debug',
 		charset	=> '(?s)^(?!.*--without-http_charset_module)',
 		gzip	=> '(?s)^(?!.*--without-http_gzip_module)',
 		ssi	=> '(?s)^(?!.*--without-http_ssi_module)',
@@ -221,6 +222,8 @@ sub has_module($) {
 			=> '(?s)^(?!.*--without-http_upstream_zone_module)',
 		upstream_sticky
 			=> '(?s)^(?!.*--without-http_upstream_sticky_module)',
+		docker
+			=> '(?s)^(?!.*--without-http_docker_module)',
 		http	=> '(?s)^(?!.*--without-http(?!\S))',
 		cache	=> '(?s)^(?!.*--without-http-cache)',
 		pop3	=> '(?s)^(?!.*--without-mail_pop3_module)',
@@ -263,6 +266,8 @@ sub has_module($) {
 			=> '(?s)^(?!.*--without-stream_upstream_random_modul)',
 		stream_upstream_zone
 			=> '(?s)^(?!.*--without-stream_upstream_zone_module)',
+		stream_upstream_sticky
+			=> '(?s)^(?!.*--without-stream_upstream_sticky_module)',
 	);
 
 	my $re = $regex{$feature};
@@ -920,6 +925,16 @@ sub read_file($) {
 	return $content;
 }
 
+sub grep_file($$) {
+	my ($self, $name, $regex) = @_;
+
+	my $lines = $self->read_file($name);
+
+	$regex = qr/.*\Q$regex\E.*/m if ref($regex) eq '';
+
+	return join "\n", $lines =~ /$regex/g;
+}
+
 sub find_in_file {
 	my ($self, $name, $pattern) = @_;
 
@@ -1453,9 +1468,16 @@ sub test_api {
 		my ($res, $details) = traverse_api_status($self->{_api_location},
 			api_status($self), unix_socket_params => $unix_socket_params);
 
-		my $ok = Test::More::ok($res, 'API');
-		unless ($ok) {
-			Test::More::diag(Test::More::explain($details));
+		unless ($res) {
+			Test::More::diag($details);
+		}
+
+		TODO: {
+			local $Test::Nginx::TODO = 'Extra keys in API response'
+				if $details && $details =~ /\s+Extra:/
+					&& $details !~ /\s+Missing:/;
+
+			Test::More::ok($res, 'API');
 		}
 	}
 

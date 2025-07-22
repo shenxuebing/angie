@@ -10,7 +10,7 @@
 use warnings;
 use strict;
 
-use Test::Deep qw/cmp_details cmp_deeply deep_diag re hash_each superhashof/;
+use Test::Deep qw/cmp_details cmp_deeply deep_diag re hash_each/;
 use Test::More;
 use JSON;
 
@@ -19,7 +19,7 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 use lib 'lib';
 use Test::Nginx;
 use Test::Nginx::Stream qw/stream/;
-use Test::Utils qw/get_json put_json delete_json patch_json stream_daemon/;
+use Test::Utils qw/ stream_daemon :json :re/;
 
 ###############################################################################
 
@@ -133,283 +133,283 @@ my %test_cases = (
 		http_get('/');
 		stream('127.0.0.1:' . port(8090))->io('....$');
 
-		my $with_debug = $t->has_module('--with-debug');
+		my $with_debug = $t->has_module('debug');
 
 		my $build;
 		if ($t->{_configure_args} =~ /--build=(?|'([^']+)'|(\S+))/) {
 			$build = $1;
 		}
 
-		my $num_re  = re(qr/^\d+$/);
-		my $time_re
-			= re(qr/^\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}(\.\d{3})?Z$/);
-
 		my $slot = {
-			fails => $num_re,
-			free  => $num_re,
-			reqs  => $num_re,
-			used  => $num_re,
+			fails => $NUM_RE,
+			free  => $NUM_RE,
+			reqs  => $NUM_RE,
+			used  => $NUM_RE,
 		};
 
 		my $zone = {
 			pages => {
-				used => $num_re,
-				free => $num_re,
+				used => $NUM_RE,
+				free => $NUM_RE,
 			},
 			slots => hash_each($slot),
 		};
 
-		my $status = superhashof({
-			angie => superhashof({
+		my $status = {
+			angie => {
 				address => '127.0.0.1',
 				config_files => {
 					$t->testdir . '/nginx.conf' => $t->read_file('nginx.conf'),
 				},
 				generation => 1,
-				load_time  => $time_re,
+				load_time  => $TIME_RE,
 				version    => re(qr/^(\d+\.)?(\d+\.)?(\d+|.+)?$/),
 				(defined $build) ? (build => $build) : (),
-				build_time => $time_re,
-			}),
-			connections => superhashof({
-				accepted => $num_re,
-				active   => $num_re,
+				build_time => $TIME_RE,
+			},
+			connections => {
+				accepted => $NUM_RE,
+				active   => $NUM_RE,
 				dropped  => 0,
 				idle     => 0,
-			}),
-			slabs => superhashof({
+			},
+			slabs => {
 				limit_conn_zone => $zone,
 				cache_zone      => $zone,
 				limit_req_zone  => $zone,
 				z1              => $zone,
 				z2              => $zone,
-			}),
-			http => superhashof({
-				caches => superhashof({
-					cache_zone => superhashof({
-						bypass => superhashof({
+			},
+			http => {
+				caches => {
+					cache_zone => {
+						bypass => {
 							bytes             => 0,
 							bytes_written     => 0,
 							responses         => 0,
 							responses_written => 0,
-						}),
+						},
 						cold    => JSON::true(),
-						expired => superhashof({
+						expired => {
 							bytes             => 0,
 							bytes_written     => 0,
 							responses         => 0,
 							responses_written => 0,
-						}),
-						hit => superhashof({
+						},
+						hit => {
 							bytes     => 0,
 							responses => 0,
-						}),
-						miss => superhashof({
+						},
+						miss => {
 							bytes             => 2,
 							bytes_written     => 0,
 							responses         => 1,
 							responses_written => 0,
-						}),
-						revalidated => superhashof({
+						},
+						revalidated => {
 							bytes     => 0,
 							responses => 0,
-						}),
+						},
 						size  => 0,
-						stale => superhashof({
+						stale => {
 							bytes     => 0,
 							responses => 0,
-						}),
-						updating => superhashof({
+						},
+						updating => {
 							bytes     => 0,
 							responses => 0,
-						}),
-					}),
-				}),
-				limit_conns => superhashof({
-					limit_conn_zone => superhashof({
+						},
+					},
+				},
+				limit_conns => {
+					limit_conn_zone => {
 						exhausted => 0,
 						passed    => 1,
 						rejected  => 0,
 						skipped   => 0,
-					}),
-				}),
-				limit_reqs => superhashof({
-					limit_req_zone => superhashof({
+					},
+				},
+				limit_reqs => {
+					limit_req_zone => {
 						delayed   => 0,
 						exhausted => 0,
 						passed    => 1,
 						rejected  => 0,
 						skipped   => 0,
-					}),
-				}),
-				location_zones => superhashof({
-					location_zone => superhashof({
-						data => superhashof({
+					},
+				},
+				location_zones => {
+					location_zone => {
+						data => {
 							received => 32,
 							sent     => 144,
-						}),
-						requests => superhashof({
+						},
+						requests => {
 							discarded => 0,
 							total     => 1,
-						}),
-						responses => superhashof({
+						},
+						responses => {
 							200 => 1,
-						}),
-					}),
-				}),
-				server_zones => superhashof({
-					http_server_zone => superhashof({
-						data => superhashof({
-							received => $num_re,
-							sent     => $num_re,
-						}),
-						requests => superhashof({
+						},
+					},
+				},
+				server_zones => {
+					http_server_zone => {
+						data => {
+							received => $NUM_RE,
+							sent     => $NUM_RE,
+						},
+						requests => {
 							discarded  => 0,
-							processing => $num_re,
-							total      => $num_re,
-						}),
-						responses => superhashof({
-							200 => $num_re,
-							404 => $num_re,
-							405 => $num_re,
-						}),
-					}),
-				}),
+							processing => $NUM_RE,
+							total      => $NUM_RE,
+						},
+						responses => {
+							200 => $NUM_RE,
+							404 => $NUM_RE,
+							405 => $NUM_RE,
+						},
+					},
+				},
 				upstreams => {
-					u1 => superhashof({
+					u1 => {
 						keepalive => 0,
 						peers     => {
-							'127.0.0.1:' . port(8081) => superhashof({
+							'127.0.0.1:' . port(8081) => {
 								backup => JSON::false(),
-								data   => superhashof({
+								data   => {
 									received => 144,
 									sent     => 47,
-								}),
-								health => superhashof({
+								},
+								health => {
 									downtime => 0,
 									fails    => 0,
 									unavailable => 0,
-								}),
+								},
 								max_conns => 1,
 								($with_debug ? (refs => 0) : ()),
-								responses => superhashof({}),
-								selected  => superhashof({
+								responses => {
+									200 => $NUM_RE,
+								},
+								selected  => {
 									current => 0,
 									total   => 1,
-								}),
+									last    => $TIME_RE,
+								},
 								server => '127.0.0.1:' . port(8081),
 								sid    => 's1',
 								state  => 'up',
 								weight => 1
-							}),
-							'127.0.0.1:' . port(8082) => superhashof({
+							},
+							'127.0.0.1:' . port(8082) => {
 								backup => JSON::true(),
-								data   => superhashof({
+								data   => {
 									received => 0,
 									sent     => 0,
-								}),
-								health => superhashof({
+								},
+								health => {
 									downtime => 0,
 									fails    => 0,
 									unavailable => 0,
-								}),
+								},
 								max_conns => 2,
 								($with_debug ? (refs => 0) : ()),
-								responses => superhashof({}),
-								selected  => superhashof({
+								responses => {},
+								selected  => {
 									current => 0,
 									total   => 0,
-								}),
+								},
 								server => '127.0.0.1:' . port(8082),
 								sid    => 's2',
 								state  => 'up',
 								weight => 2,
-							}),
+							},
 						},
 						($with_debug ? (zombies => 0)    : ()),
 						($with_debug ? (zone    => 'z1') : ()),
-					}),
+					},
 				},
-			}),
-			resolvers => superhashof({}),
-			stream => superhashof({
-				limit_conns => superhashof({}),
-				server_zones => superhashof({
-					stream_server_zone => superhashof({
-						data => superhashof({
+			},
+			resolvers => {},
+			stream => {
+				limit_conns => {},
+				server_zones => {
+					stream_server_zone => {
+						data => {
 							received => 5,
 							sent     => length(port(8071)),
-						}),
-						connections => superhashof({
+						},
+						connections => {
 							discarded  => 0,
 							processing => 0,
 							total      => 1,
 							passed     => 0,
-						}),
-						sessions => superhashof({
+						},
+						sessions => {
 							bad_gateway         => 0,
 							forbidden           => 0,
 							internal_error      => 0,
 							invalid             => 0,
 							service_unavailable => 0,
 							success             => 1,
-						}),
-					}),
-				}),
+						},
+					},
+				},
 				upstreams => {
 					u2 => {
 						peers => {
-							'127.0.0.1:' . port(8071) => superhashof({
+							'127.0.0.1:' . port(8071) => {
 								backup => JSON::false(),
-								data   => superhashof({
+								data   => {
 									received => length(port(8071)),
 									sent     => 5,
-								}),
-								health => superhashof({
+								},
+								health => {
 									downtime => 0,
 									fails    => 0,
 									unavailable => 0,
-								}),
+								},
 								max_conns => 1,
 								($with_debug ? (refs => 0) : ()),
-								selected  => superhashof({
+								selected  => {
 									current => 0,
 									total   => 1,
-								}),
+									last    => $TIME_RE,
+								},
 								server => '127.0.0.1:' . port(8071),
 								sid    => 's1',
 								state  => 'up',
 								weight => 1
-							}),
-							'127.0.0.1:' . port(8072) => superhashof({
+							},
+							'127.0.0.1:' . port(8072) => {
 								backup => JSON::true(),
-								data   => superhashof({
+								data   => {
 									received => 0,
 									sent     => 0,
-								}),
-								health => superhashof({
+								},
+								health => {
 									downtime => 0,
 									fails    => 0,
 									unavailable => 0,
-								}),
+								},
 								max_conns => 2,
 								($with_debug ? (refs => 0) : ()),
-								selected  => superhashof({
+								selected  => {
 									current => 0,
 									total   => 0
-								}),
+								},
 								server => '127.0.0.1:' . port(8072),
 								sid    => 's2',
 								state  => 'up',
 								weight => 2,
-							}),
+							},
 						},
 						($with_debug ? (zombies => 0)    : ()),
 						($with_debug ? (zone    => 'z2') : ()),
 					},
 				},
-			}),
-		});
+			},
+		};
 
 		test_api('/status/', $status);
 	},
@@ -427,59 +427,55 @@ sub test_api {
 	my $api_status = get_json($uri);
 	note(explain($api_status));
 
-	cmp_deeply($api_status, $expected, "GET $uri OK")
-		or return;
+	my ($ok, $stack) = cmp_details($api_status, $expected);
 
-	if (ref $expected eq 'Test::Deep::SuperHash') {
-		$expected = $expected->{val};
+	unless ($ok) {
+		my $details = deep_diag($stack);
+		diag("WARNING: GET $uri not OK:\n" . $details);
 
-		my ($ok, $stack) = cmp_details($api_status, $expected);
-		diag("WARNING: GET $uri: " . deep_diag($stack))
-			unless $ok;
+		TODO: {
+			local $TODO = 'Extra keys in API response'
+				if $details && $details =~ /\s+Extra:/
+					&& $details !~ /\s+Missing:/;
+
+			Test::More::ok($ok, 'GET $uri OK');
+		}
 	}
 
-	cmp_deeply(
-		put_json($uri, {}),
-		{
-			h => re('405 Method Not Allowed'),
-			j => {
-				'description' => 'The PUT method is not allowed for the'
-					. ' requested API entity "' . $uri . '".',
-				'error' => 'MethodNotAllowed'
-			}
-		},
-		"PUT $uri error OK"
-	)
-		or return;
+	my $got = put_json($uri, {});
+	my $exp = {
+		h => re('405 Method Not Allowed'),
+		j => {
+			'description' => 'The PUT method is not allowed for the'
+				. ' requested API entity "' . $uri . '".',
+			'error' => 'MethodNotAllowed'
+		}
+	};
+	cmp_deeply($got, $exp, "PUT $uri error OK")
+		or diag({got => $got, expected => $exp});
 
-	cmp_deeply(
-		delete_json($uri),
-		{
-			h => re('405 Method Not Allowed'),
-			j => {
-				'description' => 'The DELETE method is not allowed for the'
-					. ' requested API entity "' . $uri . '".',
-				'error' => 'MethodNotAllowed'
-			}
-		},
-		"DELETE $uri error OK"
-	)
-		or return;
+	$got = delete_json($uri);
+	$exp = {
+		h => re('405 Method Not Allowed'),
+		j => {
+			'description' => 'The DELETE method is not allowed for the'
+				. ' requested API entity "' . $uri . '".',
+			'error' => 'MethodNotAllowed'
+		}
+	};
+	cmp_deeply($got, $exp, "DELETE $uri error OK")
+		or diag({got => $got, expected => $exp});
 
-	cmp_deeply(
-		patch_json($uri, {a => '123'}),
-		{
-			h => re('405 Method Not Allowed'),
-			j => {
-				'description' => 'The PATCH method is not allowed for the'
-					. ' requested API entity "' . $uri . '".',
-				'error' => 'MethodNotAllowed'
-			}
-		},
-		"PATCH $uri error OK"
-	)
-		or return;
-
-	return 1;
+	$got = patch_json($uri, {a => '123'});
+	$exp = {
+		h => re('405 Method Not Allowed'),
+		j => {
+			'description' => 'The PATCH method is not allowed for the'
+				. ' requested API entity "' . $uri . '".',
+			'error' => 'MethodNotAllowed'
+		}
+	};
+	cmp_deeply($got, $exp, "PATCH $uri error OK")
+		or diag({got => $got, expected => $exp});
 }
 

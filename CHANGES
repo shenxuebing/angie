@@ -1,4 +1,82 @@
 
+Changes with Angie 1.10.1                                        17 Jul 2025
+
+    *) Change: directives specified in the "client" block can now only be
+       inherited by explicitly declared "location" blocks within that block,
+       so they don't affect the configuration of other modules that
+       implicitly use the "client" block for outgoing requests.
+
+    *) Feature: support for multiple "client" blocks allows common settings
+       for different "location" blocks to be grouped within each block,
+       which mitigates configuration duplication.
+
+    *) Bugfix: when the "reuseport" parameter was used in the "listen"
+       directive, all connections to the specified address and port were
+       handled by a single worker process; the bug had appeared in 1.10.0.
+
+    *) Bugfix: an HTTP/3 handshake with an upstream server might fail with
+       OpenSSL library version 3.5.0 or later if the QUIC protocol "retry"
+       mode was active on the server.
+
+    *) Bugfix: building the HTTP/2 and HTTP/3 modules using GCC 15 resulted
+       in an error.
+
+    *) Bugfix: building with the -O3 flag could result in an error when
+       using GCC.
+
+
+Changes with Angie 1.10.0                                        03 Jul 2025
+
+    *) Feature: automatic retrieval and dynamic updating of proxied server
+       groups based on Docker (or Podman) container labels, configured with
+       the "docker_endpoint" directive; this enables real-time monitoring of
+       container start and stop times via the specified Docker API endpoint,
+       as well as the addition or removal of their addresses from an
+       "upstream" group according to their labels, without the need for a
+       configuration reload.
+
+    *) Feature: support for automatic certificate acquisition in the stream
+       module through the use of the ACME protocol, managed using the "acme"
+       directive, along with variables named "$acme_cert_*" and
+       "$acme_cert_key_*".
+
+    *) Feature: support for handling Multipath TCP (MPTCP) connections with
+       the "multipath" parameter of the "listen" directive.
+       Thanks to Maxim Dounin (freenginx), Maxime Dourov, and Anthony
+       Doeraene.
+
+    *) Feature: the "client" block that allows to specify additional
+       configuration for the internal HTTP requests issued by various
+       modules.
+
+    *) Feature: all functionality of nginx 1.27.5, including CUBIC
+       congestion control in QUIC connections.
+
+
+Changes with Angie 1.9.1                                         29 May 2025
+
+    *) Feature: support for IP addresses along with port numbers in the
+       "acme_dns_port" directive; both IPv4 and IPv6 are allowed.
+
+    *) Bugfix: using both a wildcard domain and matching third-level domains
+       in "server_name" directives could cause the ACME server to fail when
+       issuing a certificate for these domains under a single ACME client.
+
+    *) Bugfix: in the stream module, after a successful connection to the
+       proxied server during a passive check, its status in the statistics
+       API was erroneously displayed as "unavailable" until the session
+       ended.
+
+    *) Bugfix: HTTP/3 requests might stall and time-out; the fix was ported
+       from nginx 1.29.0.
+
+    *) Bugfix: an early error while establishing an HTTP/3 connection to a
+       proxied server could cause a worker process to crash.
+
+    *) Bugfix: when proxying via the HTTP/3 protocol, the number of active
+       connections in the statistics could be displayed incorrectly.
+
+
 Changes with Angie 1.9.0                                         11 Apr 2025
 
     *) Feature: the ability to specify a file in the "proxy_cache_path"
