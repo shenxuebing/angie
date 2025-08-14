@@ -375,7 +375,7 @@ ngx_http_client_create_srv_ctx(ngx_conf_t *cf)
     ngx_http_core_srv_conf_t   *cscf;
     ngx_http_core_main_conf_t  *cmcf;
 
-    static ngx_str_t client_block = ngx_string("client{}}");
+    static ngx_str_t client_block = ngx_string("client{access_log off;}}");
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
                    "http client injecting client block");
@@ -395,6 +395,8 @@ ngx_http_client_create_srv_ctx(ngx_conf_t *cf)
     q = ngx_queue_last(&cmcf->clients);
 
     cscf = ngx_queue_data(q, ngx_http_core_srv_conf_t, client_queue);
+
+    cscf->is_implicit = 1;
 
     return cscf->ctx;
 }
@@ -735,6 +737,9 @@ ngx_http_client_init_request(ngx_connection_t *c, ngx_http_conf_ctx_t *ctx,
     {
         goto failed;
     }
+
+    r->read_event_handler = ngx_http_request_empty_handler;
+    r->write_event_handler = ngx_http_request_empty_handler;
 
     r->method = NGX_HTTP_GET;
     r->method_name = ngx_http_core_get_method;

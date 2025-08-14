@@ -5,6 +5,53 @@
 <change_log title="Angie">
 
 
+<changes ver="1.11.0" date="">
+
+<change type="bugfix">
+<para lang="ru">
+для одиночного сервера, добавленного в upstream-группу Docker-модулем,
+ошибочно работали пассивные проверки.
+</para>
+<para lang="en">
+passive checks were mistakenly active for a single server added to the
+upstream group by the Docker module.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в некоторых конфигурациях модуль http клиента мог приводить к падению
+рабочего процесса.
+</para>
+<para lang="en">
+in some configurations http client module could cause a worker process to crash.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+переменная "$http_host" в запросах по протоколу HTTP/3 теперь инициализируется
+из значения псевдо-заголовка ":authority", если заголовок "Host" не был передан.
+</para>
+<para lang="en">
+the "$http_host" variable in HTTP/3 requests is now initialized from the value
+of the ":authority" pseudo-header if the "Host" header was not passed.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+конфигурация уровня блока "http" более не наследуется в неявные блоки "client".
+</para>
+<para lang="en">
+the "http" block configuration is no longer inherited into implicit "client"
+blocks.
+</para>
+</change>
+
+</changes>
+
+
 <changes ver="1.10.1" date="2025-07-17">
 
 <change type="change">
