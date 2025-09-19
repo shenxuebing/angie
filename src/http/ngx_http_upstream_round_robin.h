@@ -74,7 +74,7 @@ struct ngx_http_upstream_rr_peer_s {
     ngx_uint_t                      max_conns;
 
     ngx_uint_t                      fails;
-    time_t                          accessed;
+    time_t                          recover_at;
     time_t                          checked;
 
     ngx_uint_t                      max_fails;
@@ -172,7 +172,7 @@ ngx_int_t ngx_api_http_upstream_peer_struct_int64_handler(
     (peer->max_fails && peer->fails >= peer->max_fails)
 
 #define ngx_http_upstream_rr_is_fail_expired(peer)                            \
-    (ngx_time() - peer->checked > peer->fail_timeout)
+    (ngx_time() - peer->checked >= peer->fail_timeout)
 
 #define ngx_http_upstream_rr_is_busy(peer)                                    \
     (peer->max_conns && peer->conns >= peer->max_conns)
@@ -213,6 +213,9 @@ ngx_int_t ngx_api_http_upstream_peer_struct_int64_handler(
 
 #define ngx_http_upstream_rr_peer_ref(peers, peer)                            \
     (peer)->refs++;
+
+#define ngx_http_upstream_conf_changed(peers, rrp)                            \
+    (peers->generation && rrp->generation != *peers->generation)
 
 
 static ngx_inline void
@@ -298,6 +301,7 @@ ngx_http_upstream_rr_peer_unref(ngx_http_upstream_rr_peers_t *peers,
 #define ngx_http_upstream_rr_peer_unlock(peers, peer)
 #define ngx_http_upstream_rr_peer_ref(peers, peer)
 #define ngx_http_upstream_rr_peer_unref(peers, peer)  NGX_OK
+#define ngx_http_upstream_conf_changed(peers, rrp)  0
 
 #endif
 
@@ -356,6 +360,52 @@ ngx_http_upstream_throttle_peer(ngx_http_upstream_rr_peer_t *peer)
     }
 
     return 100;
+}
+
+
+static ngx_inline void
+ngx_http_upstream_rr_reset_tried(ngx_http_upstream_rr_peer_data_t *rrp,
+    ngx_uint_t number)
+{
+    ngx_uint_t  i, n;
+
+    n = (number + (8 * sizeof(uintptr_t) - 1)) / (8 * sizeof(uintptr_t));
+
+    for (i = 0; i < n; i++) {
+        rrp->tried[i] = 0;
+    }
+}
+
+
+static ngx_inline ngx_uint_t
+ngx_http_upstream_rr_peer_ready(ngx_http_upstream_rr_peer_data_t *rrp,
+    ngx_http_upstream_rr_peer_t *peer, ngx_uint_t index)
+{
+    uintptr_t   m;
+    ngx_uint_t  n;
+
+    n = index / (8 * sizeof(uintptr_t));
+    m = (uintptr_t) 1 << index % (8 * sizeof(uintptr_t));
+
+    if (rrp->tried[n] & m) {
+        return 0;
+    }
+
+    if (peer->down) {
+        return 0;
+    }
+
+    if (ngx_http_upstream_rr_is_failed(peer)
+        && !ngx_http_upstream_rr_is_fail_expired(peer))
+    {
+        return 0;
+    }
+
+    if (ngx_http_upstream_rr_is_busy(peer)) {
+        return 0;
+    }
+
+    return 1;
 }
 
 

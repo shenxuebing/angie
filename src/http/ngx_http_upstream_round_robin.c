@@ -587,7 +587,7 @@ ngx_http_upstream_get_round_robin_peer(ngx_peer_connection_t *pc, void *data)
     ngx_http_upstream_rr_peer_data_t  *rrp = data;
 
     ngx_int_t                      rc;
-    ngx_uint_t                     i, n, total;
+    ngx_uint_t                     i, total;
     ngx_http_upstream_rr_peer_t   *peer;
     ngx_http_upstream_rr_peers_t  *peers;
 
@@ -604,11 +604,9 @@ ngx_http_upstream_get_round_robin_peer(ngx_peer_connection_t *pc, void *data)
     peers = rrp->peers;
     ngx_http_upstream_rr_peers_wlock(peers);
 
-#if (NGX_HTTP_UPSTREAM_ZONE)
-    if (peers->generation && rrp->generation != *peers->generation) {
+    if (ngx_http_upstream_conf_changed(peers, rrp)) {
         goto busy;
     }
-#endif
 
     i = 0;
 
@@ -622,8 +620,6 @@ ngx_http_upstream_get_round_robin_peer(ngx_peer_connection_t *pc, void *data)
         if (ngx_http_upstream_rr_is_busy(peer)) {
             goto failed;
         }
-
-        peer->checked = ngx_time();
 
     } else {
 
@@ -656,12 +652,7 @@ failed:
 
         rrp->peers = peers->next;
 
-        n = (rrp->peers->number + (8 * sizeof(uintptr_t) - 1))
-                / (8 * sizeof(uintptr_t));
-
-        for (i = 0; i < n; i++) {
-            rrp->tried[i] = 0;
-        }
+        ngx_http_upstream_rr_reset_tried(rrp, rrp->peers->number);
 
         ngx_http_upstream_rr_peers_unlock(peers);
 
@@ -673,16 +664,12 @@ failed:
 
         ngx_http_upstream_rr_peers_wlock(peers);
 
-#if (NGX_HTTP_UPSTREAM_ZONE)
-        if (peers->generation && rrp->generation != *peers->generation) {
+        if (ngx_http_upstream_conf_changed(peers, rrp)) {
             goto busy;
         }
-#endif
     }
 
-#if (NGX_HTTP_UPSTREAM_ZONE)
 busy:
-#endif
 
     ngx_http_upstream_rr_peers_unlock(peers);
 
@@ -696,9 +683,8 @@ static ngx_http_upstream_rr_peer_t *
 ngx_http_upstream_get_peer(ngx_http_upstream_rr_peer_data_t *rrp,
     ngx_uint_t *tot, ngx_uint_t *idx)
 {
-    uintptr_t                     m;
     ngx_int_t                     total, effective_weight;
-    ngx_uint_t                    i, n, p;
+    ngx_uint_t                    i, p;
     ngx_http_upstream_rr_peer_t  *peer, *best;
 
     best = NULL;
@@ -712,24 +698,7 @@ ngx_http_upstream_get_peer(ngx_http_upstream_rr_peer_data_t *rrp,
          peer;
          peer = peer->next, i++)
     {
-        n = i / (8 * sizeof(uintptr_t));
-        m = (uintptr_t) 1 << i % (8 * sizeof(uintptr_t));
-
-        if (rrp->tried[n] & m) {
-            continue;
-        }
-
-        if (peer->down) {
-            continue;
-        }
-
-        if (ngx_http_upstream_rr_is_failed(peer)
-            && !ngx_http_upstream_rr_is_fail_expired(peer))
-        {
-            continue;
-        }
-
-        if (ngx_http_upstream_rr_is_busy(peer)) {
+        if (!ngx_http_upstream_rr_peer_ready(rrp, peer, i)) {
             continue;
         }
 
@@ -775,10 +744,7 @@ ngx_http_upstream_use_rr_peer(ngx_peer_connection_t *pc,
 
     now = ngx_time();
 
-    if (now - peer->checked > peer->fail_timeout) {
-        peer->checked = now;
-    }
-
+    peer->checked = now;
     peer->conns++;
 
 #if (NGX_API && NGX_HTTP_UPSTREAM_ZONE)
@@ -823,7 +789,7 @@ ngx_http_upstream_free_round_robin_peer(ngx_peer_connection_t *pc, void *data,
         now = ngx_time();
 
         peer->fails++;
-        peer->accessed = now;
+        peer->recover_at = now + peer->fail_timeout;
         peer->checked = now;
 
         if (peer->max_fails) {
@@ -860,8 +826,9 @@ ngx_http_upstream_free_round_robin_peer(ngx_peer_connection_t *pc, void *data,
     } else {
 
         /* mark peer live if check passed */
-
-        ngx_http_upstream_recover_round_robin_peer(peer);
+        if (peer->recover_at <= peer->checked) {
+            ngx_http_upstream_recover_round_robin_peer(peer);
+        }
     }
 
     peer->conns--;
@@ -889,10 +856,6 @@ ngx_http_upstream_recover_round_robin_peer(
 #if (NGX_API && NGX_HTTP_UPSTREAM_ZONE)
     ngx_time_t  *tp;
 #endif
-
-    if (peer->accessed >= peer->checked) {
-        return;
-    }
 
     if (peer->slow_start && ngx_http_upstream_rr_is_failed(peer)) {
         peer->slow_time = ngx_current_msec;

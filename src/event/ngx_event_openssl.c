@@ -57,8 +57,6 @@ static ssize_t ngx_ssl_sendfile(ngx_connection_t *c, ngx_buf_t *file,
     size_t size);
 static void ngx_ssl_read_handler(ngx_event_t *rev);
 static void ngx_ssl_shutdown_handler(ngx_event_t *ev);
-static void ngx_ssl_connection_error(ngx_connection_t *c, int sslerr,
-    ngx_err_t err, char *text);
 static void ngx_ssl_clear_error(ngx_log_t *log);
 
 static ngx_int_t ngx_ssl_session_id_context(ngx_ssl_t *ssl,
@@ -1479,6 +1477,8 @@ ngx_ssl_passwords_cleanup(void *data)
 ngx_int_t
 ngx_ssl_dhparam(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *file)
 {
+#ifndef OPENSSL_NO_DH
+
     BIO  *bio;
 
     if (file->len == 0) {
@@ -1548,6 +1548,8 @@ ngx_ssl_dhparam(ngx_conf_t *cf, ngx_ssl_t *ssl, ngx_str_t *file)
 #endif
 
     BIO_free(bio);
+
+#endif
 
     return NGX_OK;
 }
@@ -3461,7 +3463,7 @@ ngx_ssl_shutdown_handler(ngx_event_t *ev)
 }
 
 
-static void
+void
 ngx_ssl_connection_error(ngx_connection_t *c, int sslerr, ngx_err_t err,
     char *text)
 {
@@ -5235,6 +5237,72 @@ ngx_ssl_get_curve(ngx_connection_t *c, ngx_pool_t *pool, ngx_str_t *s)
         } else {
             ngx_sprintf(s->data, "0x%04xd", nid & 0xffff);
         }
+
+        return NGX_OK;
+    }
+
+#elif defined(OPENSSL_IS_AWSLC)
+
+    uint16_t  curve_id;
+
+    curve_id = SSL_get_curve_id(c->ssl->connection);
+
+    /*
+     * Hardcoded table with ANSI / SECG curve names (e.g. "prime256v1"),
+     * which is the same format that OpenSSL returns for $ssl_curve.
+     *
+     * Without this table, we'd need to make 3 additional library calls
+     * to convert from curve_id to ANSI / SECG curve name:
+     *
+     *     nist_name = SSL_get_curve_name(curve_id);
+     *     nid = EC_curve_nist2nid(nist_name);
+     *     ansi_name = OBJ_nid2sn(nid);
+     */
+
+    switch (curve_id) {
+
+#ifdef SSL_CURVE_SECP224R1
+    case SSL_CURVE_SECP224R1:
+        ngx_str_set(s, "secp224r1");
+        return NGX_OK;
+#endif
+
+#ifdef SSL_CURVE_SECP256R1
+    case SSL_CURVE_SECP256R1:
+        ngx_str_set(s, "prime256v1");
+        return NGX_OK;
+#endif
+
+#ifdef SSL_CURVE_SECP384R1
+    case SSL_CURVE_SECP384R1:
+        ngx_str_set(s, "secp384r1");
+        return NGX_OK;
+#endif
+
+#ifdef SSL_CURVE_SECP521R1
+    case SSL_CURVE_SECP521R1:
+        ngx_str_set(s, "secp521r1");
+        return NGX_OK;
+#endif
+
+#ifdef SSL_CURVE_X25519
+    case SSL_CURVE_X25519:
+        ngx_str_set(s, "x25519");
+        return NGX_OK;
+#endif
+
+    case 0:
+        break;
+
+    default:
+        s->len = sizeof("0x0000") - 1;
+
+        s->data = ngx_pnalloc(pool, s->len);
+        if (s->data == NULL) {
+            return NGX_ERROR;
+        }
+
+        ngx_sprintf(s->data, "0x%04xd", curve_id);
 
         return NGX_OK;
     }
