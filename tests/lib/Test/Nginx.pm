@@ -130,7 +130,7 @@ sub DESTROY {
 	}
 
 	if (Test::More->builder->expected_tests && $ENV{TEST_ANGIE_VALGRIND}) {
-		my $errors = $self->grep_file('valgrind.log', /^==\d+== .+/m);
+		my $errors = $self->grep_file('valgrind.log', qr/^==\d+== .+/m);
 		Test::More::is($errors, '', 'no valgrind errors');
 	}
 
@@ -1270,8 +1270,11 @@ sub http_start($;%) {
 			)
 				or die $IO::Socket::SSL::SSL_ERROR . "\n";
 
-			log_in("ssl cipher: " . $s->get_cipher());
-			log_in("ssl cert: " . $s->peer_certificate('subject'));
+			if (!defined $extra{SSL_startHandshake}) {
+				log_in("ssl cipher: " . $s->get_cipher());
+				log_in("ssl cert: "
+					. $s->peer_certificate('subject'));
+			}
 		}
 
 		log_out($request);
