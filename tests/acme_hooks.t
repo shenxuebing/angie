@@ -30,7 +30,8 @@ select STDOUT; $| = 1;
 eval { require FCGI; };
 plan(skip_all => 'FCGI not installed') if $@;
 
-my $t = Test::Nginx->new()->has(qw/acme socket_ssl/);
+my $t = Test::Nginx->new()->has(qw/acme http_ssl socket_ssl/)
+	->has_daemon('openssl');
 
 # XXX
 # We don't use the port function here, because the port it creates is currently
@@ -204,8 +205,7 @@ $acme_helper->start_pebble({
 
 $t->run_daemon(\&hook_handler, $t, $hook_port);
 
-$t->try_run('variables in "ssl_certificate" and "ssl_certificate_key" '
-	. 'directives are not supported on this platform', 1);
+$t->run();
 
 $t->plan(scalar @clients + 2);
 

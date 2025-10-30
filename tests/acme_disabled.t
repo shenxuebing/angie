@@ -31,7 +31,8 @@ select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
 
-my $t = Test::Nginx->new()->has(qw/acme socket_ssl/);
+my $t = Test::Nginx->new()->has(qw/acme http_ssl/)
+	->has_daemon('openssl');
 
 my $d = $t->testdir();
 
@@ -131,7 +132,7 @@ foreach my $dir ($client_dir1, $client_dir2, $client_dir3) {
 }
 
 $t->try_run('variables in "ssl_certificate" and "ssl_certificate_key" '
-	. 'directives are not supported on this platform', 1);
+	. 'directives are not supported on this platform');
 
 $t->plan(3);
 

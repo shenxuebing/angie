@@ -27,7 +27,7 @@ use Test::Nginx::ACME;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/acme socket_ssl/);
+my $t = Test::Nginx->new()->has(qw/acme http_ssl socket_ssl/);
 my $d = $t->testdir();
 
 # XXX
@@ -114,7 +114,7 @@ $acme_helper->start_pebble({
 });
 
 $t->try_run('variables in "ssl_certificate" and "ssl_certificate_key" '
-	. 'directives are not supported on this platform', 1);
+	. 'directives are not supported on this platform');
 
 $t->plan(2);
 

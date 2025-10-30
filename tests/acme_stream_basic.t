@@ -26,7 +26,8 @@ use Test::Nginx::ACME;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http_acme stream_acme socket_ssl stream_return/);
+my $t = Test::Nginx->new()->has(qw/http_acme http_ssl socket_ssl/)
+	->has(qw/stream stream_acme stream_ssl stream_return/);
 
 # XXX
 # We don't use the port function here, because the port it creates is currently
@@ -111,7 +112,7 @@ $acme_helper->start_pebble({
 });
 
 $t->try_run('variables in "ssl_certificate" and "ssl_certificate_key" '
-	. 'directives are not supported on this platform', 1);
+	. 'directives are not supported on this platform');
 
 my $d = $t->testdir();
 

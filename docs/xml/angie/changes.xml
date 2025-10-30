@@ -7,6 +7,26 @@
 
 <changes ver="1.11.0" date="">
 
+<change type="feature">
+<para lang="ru">
+параметр "convert" для директивы "image_filter", который позволяет задавать
+новый формат изображений.
+</para>
+<para lang="en">
+the "convert" parameter for the "image_filter" directive, used to set
+the new image format.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+поддержка форматов AVIF и HEIC в Image Filter.
+</para>
+<para lang="en">
+support for AVIF and HEIC formats in Image Filter.
+</para>
+</change>
+
 <change type="change">
 <para lang="ru">
 параметр "REQUEST_METHOD" в файлах конфигурации "fastcgi.conf", fastcgi_params",
@@ -135,10 +155,10 @@ directive.
 
 <change type="feature">
 <para lang="ru">
-вся функциональность nginx 1.29.1.
+вся функциональность nginx 1.29.2.
 </para>
 <para lang="en">
-all functionality of nginx 1.29.1.
+all functionality of nginx 1.29.2.
 </para>
 </change>
 
@@ -152,6 +172,44 @@ all functionality of nginx 1.29.1.
 removed the need to define a separate "server" block with a "listen 80"
 directive for ACME HTTP challenges; the listening port can be customized
 using the new "acme_http_port" directive if necessary.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+добавлена поддержка Encrypted Client Hello (ECH) в HTTP и Stream SSL-модулях.
+Новая директивой "ssl_encrypted_hello_key" позволяет задать файл с приватным
+ключом.  Переменная "$ssl_encrypted_hello" содержит информацию об использовании
+ECH.
+</para>
+<para lang="en">
+added support for Encrypted Client Hello (ECH) in HTTP and Stream SSL modules.
+The new "ssl_encrypted_hello_key" directive specifies the file with private
+key.  The "$ssl_encrypted_hello" variable contains information about ECH usage.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+Процедуры перезагрузки конфигурации и обновления исполняемого файла на лету
+теперь работают штатно с HTTP/3 соединениями. Реализован корректный роутинг
+соединений ко всем существующими процессами при помощи bpf модуля.
+</para>
+<para lang="en">
+Reload and binary upgrade procedures are now working correctly with HTTP/3
+connections. Connections are properly routed to all existing processes using
+the bpf module.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+переменная "$sent_body" содержащая тело ответа подзапроса или запроса от
+клиентского модуля.
+</para>
+<para lang="en">
+the "$sent_body" variable containing response body of a subrequest or
+external request by client module.
 </para>
 </change>
 

@@ -20,8 +20,8 @@
        && !defined(BABASSL_VERSION_NUMBER))
 #define NGX_QUIC_QUICTLS_API                 1
 
-#elif (defined OPENSSL_IS_BORINGSSL || defined LIBRESSL_VERSION_NUMBER \
-       || defined BABASSL_VERSION_NUMBER || defined OPENSSL_IS_AWSLC)
+#elif (defined OPENSSL_IS_BORINGSSL || defined OPENSSL_IS_AWSLC               \
+       || defined BABASSL_VERSION_NUMBER || defined LIBRESSL_VERSION_NUMBER)
 #define NGX_QUIC_BORINGSSL_API               1
 
 #else
@@ -156,5 +156,11 @@ ngx_int_t ngx_quic_get_packet_dcid(ngx_log_t *log, u_char *data, size_t len,
     ngx_str_t *dcid);
 ngx_int_t ngx_quic_derive_key(ngx_log_t *log, const char *label,
     ngx_str_t *secret, ngx_str_t *salt, u_char *out, size_t len);
+
+#if (NGX_QUIC_BPF)
+ngx_uint_t ngx_quic_bpf_enabled(ngx_cycle_t *cycle);
+#else
+#define ngx_quic_bpf_enabled(c)  0
+#endif
 
 #endif /* _NGX_EVENT_QUIC_H_INCLUDED_ */

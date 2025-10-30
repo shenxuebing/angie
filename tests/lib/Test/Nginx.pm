@@ -9,6 +9,7 @@ package Test::Nginx;
 
 use warnings;
 use strict;
+use feature 'state';
 
 use Exporter qw/ import /;
 
@@ -16,6 +17,7 @@ BEGIN {
 	our @EXPORT = qw/ log_in log_out http http_get http_head port /;
 	our @EXPORT_OK = qw/
 		http_gzip_request http_gzip_like http_start http_end http_content
+		http_post
 	/;
 	our %EXPORT_TAGS = (
 		gzip => [ qw/ http_gzip_request http_gzip_like / ]
@@ -35,6 +37,8 @@ use Test::More qw//;
 
 use Test::Nginx::Config;
 use Test::API qw/ api_status traverse_api_status /;
+use Test::Control qw/wait_for_reload stop_pid/;
+use Test::Utils qw/trim/;
 
 ###############################################################################
 
@@ -174,12 +178,15 @@ sub has_module($) {
 		perl	=> '--with-http_perl_module',
 		http_api
 			=> '(?s)^(?!.*--without-http_api_module)',
+		prometheus
+			=> '(?s)^(?!.*--without-http_prometheus_module)',
 		auth_request
 			=> '--with-http_auth_request_module',
 		realip	=> '--with-http_realip_module',
 		sub	=> '--with-http_sub_module',
 		acme	=> '--with-http_acme_module',
 		debug   => '--with-debug',
+		quic_bpf=> '(?s)^(?!.*--without-quic_bpf_module)',
 		charset	=> '(?s)^(?!.*--without-http_charset_module)',
 		gzip	=> '(?s)^(?!.*--without-http_gzip_module)',
 		ssi	=> '(?s)^(?!.*--without-http_ssi_module)',
@@ -400,8 +407,8 @@ sub has_daemon($) {
 	return $self;
 }
 
-sub try_run($$) {
-	my ($self, $message, $check_message) = @_;
+sub try_run {
+	my ($self, @messages) = @_;
 
 	eval {
 		open OLDERR, ">&", \*STDERR; close STDERR;
@@ -418,16 +425,17 @@ sub try_run($$) {
 		close F;
 	}
 
-	my $message_found = 0;
-	if ($check_message) {
-		$message_found =
-			($self->read_file('error.log') =~ quotemeta($message));
+	my $error_log = $self->read_file('error.log');
+	foreach my $message (@messages) {
+		if ($error_log =~ quotemeta($message)) {
+			Test::More::plan(skip_all => $message);
+			return $self;
+		}
 	}
 
-	Test::More::plan(skip_all => $message)
-		if $message_found || !$check_message;
+	Test::More::diag($@);
 
-	return $self;
+	die;
 }
 
 sub retry_run($$) {
@@ -523,7 +531,7 @@ sub run(;$) {
 	unless ($nginx_started) {
 
 		# try to kill pid to prevent tests from hanging
-		$self->_stop_pid($pid, 1)
+		stop_pid($pid, 1)
 			unless defined $nginx_started;
 
 		die "Can't start nginx";
@@ -755,7 +763,7 @@ sub stop_resolver {
 		return;
 	}
 
-	$self->_stop_pid($pid, 1);
+	stop_pid($pid, 1);
 
 	my $is_running = `ps -h $pid | grep -v defunct | wc -l`;
 	$is_running =~ s/^\s+|\s+$//g;
@@ -795,7 +803,13 @@ sub wait_for_resolver {
 	return undef;
 }
 
-sub reload() {
+sub get_master_pid {
+	my ($self, $fname) = @_;
+
+	return trim($self->read_file($fname // 'nginx.pid'));
+}
+
+sub reload {
 	my ($self, $api_gen_url) = @_;
 
 	return $self unless $self->{_started};
@@ -806,7 +820,9 @@ sub reload() {
 		$generation = http_get_value($api_gen_url);
 	}
 
-	my $pid = $self->read_file('nginx.pid');
+	my $pid = $self->get_master_pid();
+
+	# TODO: get current generation
 
 	if ($^O eq 'MSWin32') {
 		my $testdir = $self->{_testdir};
@@ -821,6 +837,7 @@ sub reload() {
 		kill 'HUP', $pid;
 	}
 
+	# TODO get rid of api_gen_url
 	if ($api_gen_url) {
 		my $new_generation;
 		for (1 .. 50) {
@@ -831,47 +848,13 @@ sub reload() {
 		}
 	}
 
-	return $self;
-}
-
-sub _stop_pid {
-	my ($self, $pid, $force) = @_;
-
-	my $exited;
-
-	unless ($force) {
-
-		# let's try graceful shutdown first
-		kill 'QUIT', $pid;
-
-		for (1 .. 900) {
-			$exited = waitpid($pid, WNOHANG) != 0;
-			last if $exited;
-			select undef, undef, undef, 0.1;
-		}
-	}
-
-	# then try fast shutdown
-	if (!$exited) {
-		kill 'TERM', $pid;
-
-		for (1 .. 900) {
-			$exited = waitpid($pid, WNOHANG) != 0;
-			last if $exited;
-			select undef, undef, undef, 0.1;
-		}
-	}
-
-	# last try: brutal kill
-	# this will kill the master process and all its worker processes
-	if (!$exited) {
-		kill '-KILL', getpgrp($pid);
-
-		waitpid($pid, 0);
-	}
+	# wait until all old workers will start shut down
+	# TODO pass new_generation
+	wait_for_reload($pid);
 
 	return $self;
 }
+
 
 sub stop() {
 	my ($self) = @_;
@@ -880,9 +863,9 @@ sub stop() {
 
 	return $self unless $self->{_started};
 
-	my $pid = $self->read_file('nginx.pid');
+	my $pid = $self->get_master_pid();
 
-	$self->_stop_pid($pid);
+	stop_pid($pid);
 
 	$self->{_started} = 0;
 
@@ -948,6 +931,32 @@ sub find_in_file {
 	}
 
 	return @found;
+}
+
+# reads only new lines from error.log file
+sub tail_error_log {
+	my $self = shift;
+
+	state $error_log_fh;
+
+	my $test_dir = $self->{_testdir};
+
+	unless (defined $error_log_fh) {
+		open($error_log_fh, '<', $test_dir . '/error.log')
+			or die "Can't open $test_dir/error.log: $!";
+	}
+
+	seek($error_log_fh, 0, 1);
+
+	my @error_log;
+	for my $line (<$error_log_fh>) {
+		$line = trim($line);
+		next if $line =~ /\[debug\]/;
+		#diag($line);
+		push @error_log, $line;
+	}
+
+	return \@error_log;
 }
 
 sub write_file($$) {
@@ -1218,6 +1227,17 @@ Host: localhost
 EOF
 }
 
+sub http_post($;%) {
+	my ($url, %extra) = @_;
+	my $content_length = length($extra{body} // 0);
+	return http(<<EOF, %extra);
+POST $url HTTP/1.0
+Host: localhost
+Content-Length: $content_length
+
+EOF
+}
+
 sub http_head($;%) {
 	my ($url, %extra) = @_;
 	return http(<<EOF, %extra);
@@ -1396,8 +1416,7 @@ sub http_get_value {
 
 ###############################################################################
 
-sub prepare_ssl($)
-{
+sub prepare_ssl($) {
 	my ($self) = @_;
 
 	$self->write_file('openssl.conf', <<EOF);
@@ -1417,6 +1436,8 @@ EOF
 			. ">>$d/openssl.out 2>&1") == 0
 			or die "Can't create certificate for $name: $!\n";
 	}
+
+	return $self;
 }
 
 # runs tests. allows to run a specific test case
