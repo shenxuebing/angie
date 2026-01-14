@@ -31,6 +31,13 @@
  */
 #define NGX_ACME_ISSUANCE_TIMEOUT       60
 
+/* Certificate statuses */
+#define NGX_ACME_CERT_VALID             0
+#define NGX_ACME_CERT_EXPIRED           1
+#define NGX_ACME_CERT_MISSING           2
+#define NGX_ACME_CERT_MISMATCH          3
+#define NGX_ACME_CERT_ERROR             4
+
 #define NGX_ACME_MAX_SH_FILE            65535 /* USHRT_MAX */
 
 #define ngx_http_acme_key_supported(type, bits) \
@@ -49,13 +56,12 @@
 #define ngx_http_acme_get_main_conf() \
     ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_acme_module)
 
-#if defined(OPENSSL_IS_BORINGSSL) || defined(OPENSSL_IS_AWSLC)
-#define X509V3_EXT_conf_nid_f   X509V3_EXT_nconf_nid
-#define X509V3_EXT_conf_nid_n   "X509V3_EXT_nconf_nid()"
-#else
-#define X509V3_EXT_conf_nid_f   X509V3_EXT_conf_nid
-#define X509V3_EXT_conf_nid_n   "X509V3_EXT_conf_nid()"
-#endif
+#define ngx_http_acme_challenge_is(amcf, ch) \
+    (amcf->handle_challenge & ((ngx_uint_t) 1 << (ch)))
+
+#define ngx_http_acme_challenge_set(amcf, ch) \
+    do { amcf->handle_challenge |= ((ngx_uint_t) 1 << (ch)); } while (0)
+
 
 #if (NGX_DEBUG)
 
@@ -126,6 +132,7 @@ typedef enum {
 typedef enum {
     NGX_AC_HTTP_01,
     NGX_AC_DNS_01,
+    NGX_AC_ALPN_01
 } ngx_acme_challenge_t;
 
 
@@ -136,145 +143,181 @@ typedef enum {
 
 
 typedef struct {
-    ngx_keytype_t               type;
-    EVP_PKEY                   *key;
-    int                         bits;
-    ngx_file_t                  file;
-    size_t                      file_size;
+    ngx_keytype_t                type;
+    EVP_PKEY                    *key;
+    int                          bits;
+    ngx_file_t                   file;
+    size_t                       file_size;
 } ngx_acme_privkey_t;
+
+
+#if (NGX_API)
+
+typedef struct {
+    time_t                       expiry_time;
+    time_t                       renew_time;
+    uint8_t                      cli_status;
+    uint8_t                      cert_status;
+    uint8_t                      details_len;
+    u_char                       details[125];
+} ngx_api_acme_sh_client_t;
+
+#endif
 
 
 typedef struct ngx_acme_client_s           ngx_acme_client_t;
 typedef struct ngx_http_acme_main_conf_s   ngx_http_acme_main_conf_t;
+typedef struct ngx_http_acme_port_conf_s   ngx_http_acme_port_conf_t;
 typedef struct ngx_http_acme_srv_conf_s    ngx_http_acme_srv_conf_t;
 typedef struct ngx_http_acme_session_s     ngx_http_acme_session_t;
 typedef struct ngx_http_acme_sh_keyauth_s  ngx_http_acme_sh_keyauth_t;
 typedef struct ngx_http_acme_sh_cert_s     ngx_http_acme_sh_cert_t;
+typedef struct ngx_http_acme_sh_alpn_s     ngx_http_acme_sh_alpn_t;
 
 
 struct ngx_acme_client_s {
-    ngx_log_t                  *log;
-    ngx_str_t                   name;
-    ngx_str_t                   path;
-    ngx_uint_t                  cf_line;
-    ngx_str_t                   cf_filename;
-    ngx_str_t                   server;
-    ngx_url_t                   server_url;
-    ngx_str_t                   email;
-    ngx_array_t                *domains;
-    time_t                      renew_before_expiry;
-    time_t                      retry_after_error;
-    time_t                      expiry_time;
-    time_t                      renew_time;
-    size_t                      max_cert_size;
-    ngx_uint_t                  challenge;
-    ngx_uint_t                  ssl;
-    ngx_acme_privkey_t          account_key;
-    ngx_acme_privkey_t          private_key;
-    u_char                     *private_key_data;
-    ngx_file_t                  certificate_file;
-    size_t                      certificate_file_size;
-    ngx_http_acme_session_t    *session;
-    ngx_http_acme_sh_cert_t    *sh_cert;
-    ngx_http_core_loc_conf_t   *hook_clcf;
-    ngx_http_conf_ctx_t        *hook_ctx;
-    ngx_http_complex_value_t   *hook_uri;
+    ngx_log_t                   *log;
+    ngx_str_t                    name;
+    ngx_str_t                    path;
+    ngx_uint_t                   cf_line;
+    ngx_str_t                    cf_filename;
+    ngx_str_t                    server;
+    ngx_url_t                    server_url;
+    ngx_str_t                    email;
+    ngx_array_t                 *domains;
+    time_t                       renew_before_expiry;
+    time_t                       retry_after_error;
+    time_t                       expiry_time;
+    time_t                       renew_time;
+    size_t                       max_cert_size;
+    ngx_uint_t                   challenge;
+    ngx_uint_t                   ssl;
+    ngx_acme_privkey_t           account_key;
+    ngx_acme_privkey_t           private_key;
+    u_char                      *private_key_data;
+    ngx_file_t                   certificate_file;
+    size_t                       certificate_file_size;
+    ngx_http_acme_session_t     *session;
+    ngx_http_acme_sh_cert_t     *sh_cert;
+    ngx_http_core_loc_conf_t    *hook_clcf;
+    ngx_http_conf_ctx_t         *hook_ctx;
+    ngx_http_complex_value_t    *hook_uri;
 
-    unsigned                    enabled:1;
-    unsigned                    renew_on_load:1;
+    unsigned                     enabled:1;
+    unsigned                     renew_on_load:1;
+};
+
+
+struct ngx_http_acme_port_conf_s {
+    ngx_addr_t                  *addr;
+    ngx_uint_t                   port_only;  /* unsigned  port_only:1; */
 };
 
 
 struct ngx_http_acme_main_conf_s {
-    ngx_http_conf_ctx_t        *ctx;
-    ngx_acme_client_t          *current;
-    ngx_shm_zone_t             *shm_zone;
+    ngx_http_conf_ctx_t         *ctx;
+    ngx_acme_client_t           *current;
+    ngx_shm_zone_t              *shm_zone;
     /* event ident must be after 3 pointers as in ngx_connection_t */
-    ngx_int_t                   dummy;
-    ngx_conf_t                 *cf;
-    ngx_log_t                   log;
-    ngx_http_log_ctx_t          log_ctx;
-    ngx_array_t                 clients;
-    ngx_event_t                 timer_event;
-    size_t                      max_key_auth_size;
-    ngx_http_acme_sh_keyauth_t *sh;
-    ngx_str_t                   path;
-    ngx_str_t                   acme_server_var;
-    ngx_uint_t                  handle_challenge;
-    ngx_http_conf_ctx_t        *listen_ctx;
-    ngx_http_core_srv_conf_t   *listen_srv;
-    ngx_connection_handler_pt   default_dns_handler;
-    ngx_addr_t                 *dns_port;
-    ngx_addr_t                 *http_port;
+    ngx_int_t                    dummy;
+    ngx_conf_t                  *cf;
+    ngx_log_t                    log;
+    ngx_http_log_ctx_t           log_ctx;
+    ngx_array_t                  clients;
+    ngx_event_t                  timer_event;
+    size_t                       max_key_auth_size;
+    size_t                       max_response_size;
+    ngx_http_acme_sh_keyauth_t  *sh;
+    ngx_http_acme_sh_alpn_t     *alpn;
+    ngx_str_t                    path;
+    ngx_str_t                    acme_server_var;
+    ngx_uint_t                   handle_challenge;
+    ngx_http_conf_ctx_t         *listen_ctx;
+    ngx_http_core_srv_conf_t    *listen_srv;
+    ngx_connection_handler_pt    default_dns_handler;
+    ngx_http_acme_port_conf_t    dns_port;
+    ngx_http_acme_port_conf_t    http_port;
 };
 
 
 struct ngx_http_acme_srv_conf_s {
-    ngx_array_t                 clients;
+    ngx_array_t                  clients;
 };
 
 
 struct ngx_http_acme_session_s {
-    ngx_pool_t                 *pool;
-    ngx_log_t                  *log;
-    ngx_acme_client_t          *client;
-    ngx_int_t                   request_result;
-    ngx_str_t                   request_url;
-    ngx_data_item_t            *dir;
-    ngx_int_t                   status_code;
-    ngx_str_t                   body;
-    ngx_data_item_t            *json;
-    ngx_str_t                   post_url;
-    ngx_str_t                   post_payload;
-    ngx_uint_t                  post_count;
-    ngx_str_t                   jws;
-    ngx_str_t                   nonce;
-    ngx_str_t                   content_type;
-    ngx_str_t                   location;
-    ngx_str_t                   kid;
-    ngx_str_t                   order_url;
-    ngx_data_item_t            *auths;
-    ngx_data_item_t            *auth;
-    ngx_str_t                   auth_url;
-    ngx_str_t                   ident;
-    ngx_str_t                   thumbprint;
-    ngx_str_t                   challenge_url;
-    ngx_str_t                   cert_url;
-    ngx_str_t                   token;
-    ngx_str_t                   key_auth;
-    time_t                      delay_expire;
-    time_t                      deadline;
+    ngx_pool_t                  *pool;
+    ngx_log_t                   *log;
+    ngx_acme_client_t           *client;
+    ngx_int_t                    request_result;
+    ngx_str_t                    request_url;
+    ngx_data_item_t             *dir;
+    ngx_int_t                    status_code;
+    ngx_str_t                    body;
+    ngx_data_item_t             *json;
+    ngx_str_t                    post_url;
+    ngx_str_t                    post_payload;
+    ngx_uint_t                   post_count;
+    ngx_str_t                    jws;
+    ngx_str_t                    nonce;
+    ngx_str_t                    content_type;
+    ngx_str_t                    location;
+    ngx_str_t                    kid;
+    ngx_str_t                    order_url;
+    ngx_data_item_t             *auths;
+    ngx_data_item_t             *auth;
+    ngx_str_t                    auth_url;
+    ngx_str_t                    ident;
+    ngx_str_t                    thumbprint;
+    ngx_str_t                    challenge_url;
+    ngx_str_t                    cert_url;
+    ngx_str_t                    token;
+    ngx_str_t                    key_auth;
+    time_t                       delay_expire;
+    time_t                       deadline;
 
-    ngx_event_t                 run_event;
-    ngx_acme_hook_t             hook;
-    ngx_uint_t                  in_hook;
-    ngx_uint_t                  hook_added;
+    ngx_event_t                  run_event;
+    ngx_acme_hook_t              hook;
+    ngx_uint_t                   in_hook;
+    ngx_uint_t                   hook_added;
     /* fiber variables */
-    ngx_fiber_state_t           send_request_state;
-    ngx_fiber_state_t           get_state;
-    ngx_fiber_state_t           post_state;
-    ngx_fiber_state_t           run_state;
-    ngx_fiber_state_t           new_nonce_state;
-    ngx_fiber_state_t           bootstrap_state;
-    ngx_fiber_state_t           account_ensure_state;
-    ngx_fiber_state_t           cert_issue_state;
-    ngx_fiber_state_t           authorize_state;
-    ngx_fiber_state_t           hook_notify_state;
+    ngx_fiber_state_t            send_request_state;
+    ngx_fiber_state_t            get_state;
+    ngx_fiber_state_t            post_state;
+    ngx_fiber_state_t            run_state;
+    ngx_fiber_state_t            new_nonce_state;
+    ngx_fiber_state_t            bootstrap_state;
+    ngx_fiber_state_t            account_ensure_state;
+    ngx_fiber_state_t            cert_issue_state;
+    ngx_fiber_state_t            authorize_state;
+    ngx_fiber_state_t            hook_notify_state;
 };
 
 
 struct ngx_http_acme_sh_keyauth_s {
-    ngx_atomic_t                key_auth_lock;
-    u_short                     token_len;
-    u_short                     key_auth_len;
-    u_char                      data_start[1];
+    ngx_atomic_t                 key_auth_lock;
+    u_short                      token_len;
+    u_short                      key_auth_len;
+    u_char                       data_start[1];
 };
 
 
 struct ngx_http_acme_sh_cert_s {
-    ngx_atomic_t                lock;
-    u_short                     len;
-    u_char                      data_start[1];
+    ngx_atomic_t                 lock;
+#if (NGX_API)
+    ngx_api_acme_sh_client_t     cli;
+#endif
+    u_short                      len;
+    u_char                       data_start[1];
+};
+
+
+struct ngx_http_acme_sh_alpn_s {
+    ngx_atomic_t                 lock;
+    u_short                      cert_len;
+    u_char                       cert[4 * 1024];
+    u_short                      key_len;
+    u_char                       key[1024];
 };
 
 
@@ -345,12 +388,13 @@ static ngx_int_t ngx_http_acme_identifiers(ngx_http_acme_session_t *ses,
     ngx_str_t *identifiers);
 static ngx_int_t ngx_http_acme_jwk_thumbprint(ngx_http_acme_session_t *ses,
     ngx_acme_privkey_t *key, ngx_str_t *thumbprint);
-static ngx_int_t ngx_http_acme_sha256_base64url(ngx_http_acme_session_t *ses,
-    ngx_str_t *str, ngx_str_t *encoded);
+static ngx_int_t ngx_http_acme_sha256(ngx_http_acme_session_t *ses,
+    ngx_str_t *str, ngx_uint_t base64url, ngx_str_t *encoded);
 static time_t ngx_http_acme_parse_ssl_time(const ASN1_TIME *asn1time,
     ngx_log_t *log);
-static time_t ngx_http_acme_cert_validity(ngx_acme_client_t *cli,
-    ngx_uint_t log_diagnosis, const u_char *cert_data, size_t cert_len);
+static ngx_uint_t ngx_http_acme_cert_validity(ngx_acme_client_t *cli,
+    ngx_uint_t log_diagnosis, const u_char *cert_data, size_t cert_len,
+    time_t *cert_expiry);
 static ngx_int_t ngx_http_acme_full_path(ngx_pool_t *pool, ngx_str_t *name,
     ngx_str_t *filename, ngx_str_t *full_path);
 static ngx_int_t ngx_http_acme_init_request(ngx_http_request_t *r,
@@ -391,8 +435,14 @@ static ngx_int_t ngx_http_acme_cert_issue(ngx_http_acme_session_t *ses);
 static ngx_int_t ngx_http_acme_authorize(ngx_http_acme_session_t *ses);
 static ngx_int_t ngx_http_acme_get_shared_key_auth(ngx_pool_t *pool,
     ngx_str_t *token, ngx_str_t *key_auth);
+static ngx_int_t ngx_http_acme_get_shared_alpn_data(ngx_pool_t *pool,
+    ngx_str_t *item, ngx_uint_t need_key);
 static ngx_int_t ngx_http_acme_share_key_auth(ngx_http_acme_session_t *ses,
     ngx_str_t *key_auth, u_short token_len);
+static ngx_int_t ngx_http_acme_share_alpn_data(ngx_http_acme_session_t *ses,
+    ngx_str_t *ident, ngx_str_t *token);
+static ngx_int_t ngx_http_acme_create_alpn_cert(ngx_http_acme_session_t *ses,
+    ngx_str_t *ident, ngx_str_t *token, ngx_str_t *cert, ngx_str_t *key);
 static char *ngx_http_acme_client(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_acme(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
@@ -418,6 +468,9 @@ static ngx_int_t ngx_http_acme_server_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_acme_hook_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_acme_handle_alpn_variable(ngx_pool_t *pool,
+    ngx_variable_value_t *v, ngx_acme_client_t *cli, ngx_uint_t is_key,
+    const void *proto, size_t proto_len);
 static ngx_acme_client_t *ngx_acme_client_add(ngx_conf_t *cf, ngx_str_t *name);
 static ngx_int_t ngx_acme_add_domain(ngx_acme_client_t *cli,
     ngx_str_t *domain);
@@ -441,11 +494,13 @@ static ngx_int_t ngx_str_clone(ngx_pool_t *pool, ngx_str_t *dst,
 static ngx_uint_t ngx_dec_count(ngx_int_t i);
 static int ngx_clone_table_elt(ngx_pool_t *pool, ngx_str_t *dst,
     ngx_table_elt_t *src);
+static size_t ngx_calc_cert_size(ngx_array_t *domains);
 
 
 static const ngx_str_t ngx_acme_challenge_names[] = {
     ngx_string("http"),
     ngx_string("dns"),
+    ngx_string("alpn"),
 };
 
 
@@ -462,6 +517,13 @@ static ngx_command_t  ngx_http_acme_commands[] = {
       ngx_conf_set_str_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof(ngx_http_acme_main_conf_t, path),
+      NULL },
+
+    { ngx_string("acme_max_response_size"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof(ngx_http_acme_main_conf_t, max_response_size),
       NULL },
 
     { ngx_string("acme_client"),
@@ -568,6 +630,69 @@ static ngx_http_variable_t  ngx_http_acme_hook_vars[] = {
 
     ngx_http_null_variable
 };
+
+
+#if (NGX_API)
+
+/* ACME client statuses */
+#define NGX_API_CLI_DISABLED     0
+#define NGX_API_CLI_READY        1
+#define NGX_API_CLI_FAILED       2
+#define NGX_API_CLI_REQUESTING   3
+
+
+static void ngx_api_set_cli_status(ngx_acme_client_t *cli,
+    ngx_uint_t status, const char *fmt, ...);
+static void ngx_api_set_cli_status_unlocked(ngx_api_acme_sh_client_t *sh,
+    ngx_uint_t status, const char *fmt, ...);
+static void ngx_api_vset_cli_status_unlocked(ngx_api_acme_sh_client_t *sh,
+    ngx_uint_t status, const char *fmt, va_list args);
+static ngx_int_t ngx_api_http_acme_handler(ngx_api_entry_data_t data,
+    ngx_api_ctx_t *actx, void *ctx);
+static ngx_int_t ngx_api_acme_iter(ngx_api_iter_ctx_t *ictx,
+    ngx_api_ctx_t *actx);
+static ngx_int_t ngx_api_acme_client_status_handler(
+    ngx_api_entry_data_t data, ngx_api_ctx_t *actx, void *ctx);
+static ngx_int_t ngx_api_acme_certificate_status_handler(
+    ngx_api_entry_data_t data, ngx_api_ctx_t *actx, void *ctx);
+static ngx_int_t ngx_api_acme_client_details_handler(
+    ngx_api_entry_data_t data, ngx_api_ctx_t *actx, void *ctx);
+static ngx_int_t ngx_api_acme_client_renew_time_handler(
+    ngx_api_entry_data_t data, ngx_api_ctx_t *actx, void *ctx);
+
+
+static ngx_api_entry_t  ngx_api_acme_entries[] = {
+
+    {
+        .name      = ngx_string("state"),
+        .handler   = ngx_api_acme_client_status_handler,
+    },
+
+    {
+        .name      = ngx_string("certificate"),
+        .handler   = ngx_api_acme_certificate_status_handler,
+    },
+
+    {
+        .name      = ngx_string("details"),
+        .handler   = ngx_api_acme_client_details_handler,
+    },
+
+    {
+        .name      = ngx_string("next_run"),
+        .handler   = ngx_api_acme_client_renew_time_handler,
+    },
+
+    ngx_api_null_entry
+};
+
+
+static ngx_api_entry_t  ngx_api_acme_client_entry = {
+    .name      = ngx_string("acme_clients"),
+    .handler   = ngx_api_http_acme_handler,
+};
+
+#endif
 
 
 static u_char *
@@ -931,31 +1056,32 @@ ngx_http_acme_encoded_ec_params(ngx_http_acme_session_t *ses,
     by = BN_new();
 
     if (!bx || !by) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "BN_new() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BN_new() failed");
         goto failed;
     }
 
     ec = EVP_PKEY_get0_EC_KEY(key->key);
     if (!ec) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
                       "EVP_PKEY_get0_EC_KEY() failed");
         goto failed;
     }
 
     g = EC_KEY_get0_group(ec);
     if (!g) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EC_KEY_get0_group() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EC_KEY_get0_group() failed");
         goto failed;
     }
 
     pubkey = EC_KEY_get0_public_key(ec);
     if (!pubkey) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EC_KEY_get0_group() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "EC_KEY_get0_public_key() failed");
         goto failed;
     }
 
     if (!EC_POINT_get_affine_coordinates(g, pubkey, bx, by, NULL)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
                       "EC_POINT_get_affine_coordinates() failed");
         goto failed;
     }
@@ -1020,7 +1146,7 @@ ngx_http_acme_encoded_rsa_params(ngx_http_acme_session_t *ses,
     rsa = EVP_PKEY_get0_RSA(key->key);
 
     if (!rsa) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_PKEY_get0_RSA() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_PKEY_get0_RSA() failed");
         return NGX_ERROR;
     }
 
@@ -1064,7 +1190,7 @@ ngx_http_acme_bn_encode(ngx_http_acme_session_t *ses, ngx_str_t * dst,
     }
 
     if ((size_t) BN_bn2bin(bn, bn_data) != n) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "BN_bn2bin() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BN_bn2bin() failed");
         goto failed;
     }
 
@@ -1191,7 +1317,7 @@ ngx_http_acme_jws_encode(ngx_http_acme_session_t *ses,
 
     emc = EVP_MD_CTX_create();
     if (!emc) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_MD_CTX_create() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_MD_CTX_create() failed");
         goto failed;
     }
 
@@ -1203,17 +1329,17 @@ ngx_http_acme_jws_encode(ngx_http_acme_session_t *ses,
     }
 
     if (!EVP_SignInit_ex(emc, hash_type, NULL)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_SignInit_ex() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_SignInit_ex() failed");
         goto failed;
     }
 
     if (!EVP_SignUpdate(emc, enc_combined.data, enc_combined.len)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_SignUpdate() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_SignUpdate() failed");
         goto failed;
     }
 
     if (!EVP_SignFinal(emc, sig.data, &n, key->key)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_SignFinal() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_SignFinal() failed");
         goto failed;
     }
 
@@ -1292,7 +1418,7 @@ ngx_http_acme_ec_decode(ngx_http_acme_session_t *ses, size_t hash_size,
     s = d2i_ECDSA_SIG(NULL, &tmp, sig->len);
 
     if (!s) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "d2i_ECDSA_SIG() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "d2i_ECDSA_SIG() failed");
         return NGX_ERROR;
     }
 
@@ -1314,7 +1440,7 @@ ngx_http_acme_ec_decode(ngx_http_acme_session_t *ses, size_t hash_size,
     }
 
     if ((size_t) BN_bn2bin(br, p) != n) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "BN_bn2bin() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BN_bn2bin() failed");
         goto failed;
     }
 
@@ -1333,7 +1459,7 @@ ngx_http_acme_ec_decode(ngx_http_acme_session_t *ses, size_t hash_size,
     }
 
     if ((size_t) BN_bn2bin(bs, p) != n) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "BN_bn2bin() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BN_bn2bin() failed");
         goto failed;
     }
 
@@ -1566,14 +1692,14 @@ ngx_http_acme_key_gen(ngx_acme_client_t *cli, ngx_acme_privkey_t *key)
     bio = NULL;
     k = NULL;
 
-    if (!EVP_PKEY_keygen_init(epc)) {
+    if (EVP_PKEY_keygen_init(epc) < 1) {
         ngx_ssl_error(NGX_LOG_ALERT, cli->log, 0,
                       "EVP_PKEY_keygen_init() failed");
         goto failed;
     }
 
     if (key->type == NGX_KT_RSA) {
-        if (!EVP_PKEY_CTX_set_rsa_keygen_bits(epc, key->bits)) {
+        if (EVP_PKEY_CTX_set_rsa_keygen_bits(epc, key->bits) < 1) {
             ngx_ssl_error(NGX_LOG_ALERT, cli->log, 0,
                           "EVP_PKEY_CTX_set_rsa_keygen_bits() failed");
             goto failed;
@@ -1595,14 +1721,14 @@ ngx_http_acme_key_gen(ngx_acme_client_t *cli, ngx_acme_privkey_t *key)
             goto failed;
         }
 
-        if (!EVP_PKEY_CTX_set_ec_paramgen_curve_nid(epc, n)) {
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(epc, n) < 1) {
             ngx_ssl_error(NGX_LOG_ALERT, cli->log, 0,
                           "EVP_PKEY_CTX_set_ec_paramgen_curve_nid");
             goto failed;
         }
     }
 
-    if (!EVP_PKEY_keygen(epc, &k)) {
+    if (EVP_PKEY_keygen(epc, &k) < 1) {
         ngx_ssl_error(NGX_LOG_ALERT, cli->log, 0, "EVP_PKEY_keygen() failed");
         goto failed;
     }
@@ -1700,7 +1826,7 @@ ngx_http_acme_csr_gen(ngx_http_acme_session_t *ses, ngx_acme_privkey_t *key,
 
     crq = X509_REQ_new();
     if (!crq) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "X509_REQ_new() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_REQ_new() failed");
         return NGX_ERROR;
     }
 
@@ -1708,12 +1834,12 @@ ngx_http_acme_csr_gen(ngx_http_acme_session_t *ses, ngx_acme_privkey_t *key,
 
     name = X509_NAME_new();
     if (!name) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "X509_NAME_new() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_NAME_new() failed");
         goto failed;
     }
 
     if (!X509_REQ_set_pubkey(crq, key->key)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "X509_REQ_set_pubkey() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_REQ_set_pubkey() failed");
         goto failed;
     }
 
@@ -1723,13 +1849,13 @@ ngx_http_acme_csr_gen(ngx_http_acme_session_t *ses, ngx_acme_privkey_t *key,
     if (!X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, s.data, s.len,
                                     -1, 0))
     {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
                       "X509_NAME_add_entry_by_txt() failed");
         goto failed;
     }
 
     if (!X509_REQ_set_subject_name(crq, name)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
                       "X509_REQ_set_subject_name() failed");
         goto failed;
     }
@@ -1758,44 +1884,44 @@ ngx_http_acme_csr_gen(ngx_http_acme_session_t *ses, ngx_acme_privkey_t *key,
 
     exts = sk_X509_EXTENSION_new_null();
     if (!exts) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
                       "sk_X509_EXTENSION_new_null() failed");
         goto failed;
     }
 
-    ext = X509V3_EXT_conf_nid_f(NULL, NULL, NID_subject_alt_name, (char *) san);
+    ext = X509V3_EXT_nconf(NULL, NULL, "subjectAltName", (char *) san);
     if (!ext) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
-                      X509V3_EXT_conf_nid_n " failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509V3_EXT_nconf() failed");
         goto failed;
     }
 
     sk_X509_EXTENSION_push(exts, ext);
 
-    ext = X509V3_EXT_conf_nid_f(NULL, NULL, NID_key_usage, key_usage);
+    ext = X509V3_EXT_nconf(NULL, NULL, "keyUsage", key_usage);
     if (!ext) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
-                      X509V3_EXT_conf_nid_n " failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509V3_EXT_nconf() failed");
         goto failed;
     }
 
     sk_X509_EXTENSION_push(exts, ext);
 
     if (!X509_REQ_add_extensions(crq, exts)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0,
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
                       "X509_REQ_add_extensions() failed");
         goto failed;
     }
 
     if (!X509_REQ_sign(crq, key->key, hash_type)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "X509_REQ_sign() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_REQ_sign() failed");
         goto failed;
     }
 
     csr_size = i2d_X509_REQ(crq, NULL);
 
     if (csr_size < 0) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "i2d_X509_REQ() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "i2d_X509_REQ() failed");
         goto failed;
     }
 
@@ -1807,7 +1933,7 @@ ngx_http_acme_csr_gen(ngx_http_acme_session_t *ses, ngx_acme_privkey_t *key,
     p = csr_data;
 
     if (i2d_X509_REQ(crq, &p) != csr_size) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "i2d_X509_REQ() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "i2d_X509_REQ() failed");
         goto failed;
     }
 
@@ -1894,13 +2020,13 @@ ngx_http_acme_jwk_thumbprint(ngx_http_acme_session_t *ses,
         return NGX_ERROR;
     }
 
-    return ngx_http_acme_sha256_base64url(ses, &jwk, thumbprint);
+    return ngx_http_acme_sha256(ses, &jwk, 1, thumbprint);
 }
 
 
 static ngx_int_t
-ngx_http_acme_sha256_base64url(ngx_http_acme_session_t *ses,
-    ngx_str_t *str, ngx_str_t *encoded)
+ngx_http_acme_sha256(ngx_http_acme_session_t *ses,
+    ngx_str_t *str, ngx_uint_t base64url, ngx_str_t *encoded)
 {
     u_char       hash[EVP_MAX_MD_SIZE], *p;
     unsigned     size;
@@ -1910,37 +2036,49 @@ ngx_http_acme_sha256_base64url(ngx_http_acme_session_t *ses,
 
     emc = EVP_MD_CTX_create();
     if (!emc) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_MD_CTX_create() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_MD_CTX_create() failed");
         return NGX_ERROR;
     }
 
     rc = NGX_ERROR;
 
     if (!EVP_DigestInit_ex(emc, EVP_sha256(), NULL)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_DigestInit_ex() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_DigestInit_ex() failed");
         goto failed;
     }
 
     if (!EVP_DigestUpdate(emc, str->data, str->len)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_DigestUpdate() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_DigestUpdate() failed");
         goto failed;
     }
 
     if (!EVP_DigestFinal_ex(emc, hash, &size)) {
-        ngx_ssl_error(NGX_LOG_ERR, ses->log, 0, "EVP_DigestFinal_ex() failed");
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "EVP_DigestFinal_ex() failed");
         goto failed;
     }
 
-    p = ngx_pnalloc(ses->pool, ngx_base64_encoded_length(size));
-    if (!p) {
-        goto failed;
+    if (base64url) {
+        p = ngx_pnalloc(ses->pool, ngx_base64_encoded_length(size));
+        if (!p) {
+            goto failed;
+        }
+
+        encoded->data = p;
+        s.data = hash;
+        s.len = size;
+
+        ngx_encode_base64url(encoded, &s);
+
+    } else {
+        p = ngx_pnalloc(ses->pool, size);
+        if (!p) {
+            goto failed;
+        }
+
+        ngx_memcpy(p, hash, size);
+        encoded->data = p;
+        encoded->len = size;
     }
-
-    encoded->data = p;
-    s.data = hash;
-    s.len = size;
-
-    ngx_encode_base64url(encoded, &s);
 
     rc = NGX_OK;
 
@@ -2001,14 +2139,11 @@ ngx_http_acme_parse_ssl_time(const ASN1_TIME *asn1time, ngx_log_t *log)
 
 
 /*
- * Return values:
- * + expiry time of the certificate if the certificate is valid;
- * + NGX_DECLINED if the certificate is invalid (e.g. expired);
- * + NGX_ERROR if an OpenSSL or system error occurred.
+ * Returns one of the NGX_ACME_CERT_... values.
  */
-static time_t
+static ngx_uint_t
 ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
-    const u_char *cert_data, size_t cert_len)
+    const u_char *cert_data, size_t cert_len, time_t *cert_expiry)
 {
     int               type, i, found;
 #if defined(OPENSSL_IS_BORINGSSL) || defined(OPENSSL_IS_AWSLC)
@@ -2019,8 +2154,8 @@ ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
     BIO              *bio;
     X509             *x509;
     u_char           *s;
-    time_t            rc;
-    ngx_uint_t        di;
+    time_t            expiry;
+    ngx_uint_t        rc, di;
     ngx_str_t         domain;
     X509_NAME        *subj_name;
     ASN1_STRING      *value;
@@ -2033,7 +2168,7 @@ ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
 
     if (bio == NULL) {
         ngx_ssl_error(NGX_LOG_ALERT, cli->log, 0, "BIO_new_mem_buf() failed");
-        return NGX_ERROR;
+        return NGX_ACME_CERT_ERROR;
     }
 
     x509 = PEM_read_bio_X509(bio, NULL, NULL, NULL);
@@ -2041,7 +2176,7 @@ ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
     if (x509 == NULL) {
         ngx_ssl_error(NGX_LOG_ALERT, cli->log, 0, "PEM_read_bio_X509() failed");
         BIO_free(bio);
-        return NGX_ERROR;
+        return NGX_ACME_CERT_ERROR;
     }
 
 #if OPENSSL_VERSION_NUMBER > 0x10100000L
@@ -2050,21 +2185,24 @@ ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
     t = (const ASN1_TIME *) X509_get_notAfter(x509);
 #endif
 
-    rc = ngx_http_acme_parse_ssl_time(t, cli->log);
+    expiry = ngx_http_acme_parse_ssl_time(t, cli->log);
 
-    if (rc == (time_t) NGX_ERROR) {
+    if (expiry == (time_t) NGX_ERROR) {
         ngx_log_error(NGX_LOG_ALERT, cli->log, 0,
                       "couldn't extract time from certificate");
+
+        rc = NGX_ACME_CERT_ERROR;
         goto failed;
     }
 
-    if (ngx_time() >= rc) {
-        /* expired */
+    *cert_expiry = expiry;
+
+    if (ngx_time() >= expiry) {
         if (log_diagnosis) {
             ngx_log_error(NGX_LOG_NOTICE, cli->log, 0, "certificate expired");
         }
 
-        rc = NGX_DECLINED;
+        rc = NGX_ACME_CERT_EXPIRED;
         goto failed;
     }
 
@@ -2076,9 +2214,11 @@ ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
                           "no SAN entry in certificate");
         }
 
-        rc = NGX_DECLINED;
+        rc = NGX_ACME_CERT_MISMATCH;
         goto failed;
     }
+
+    rc = NGX_ACME_CERT_VALID;
 
     subj_name = X509_get_subject_name(x509);
 
@@ -2162,7 +2302,7 @@ ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
                               &domain);
             }
 
-            rc = NGX_DECLINED;
+            rc = NGX_ACME_CERT_MISMATCH;
             break;
         }
     }
@@ -2230,6 +2370,11 @@ ngx_http_acme_run(ngx_http_acme_session_t *ses)
         goto failed;
     }
 
+#if (NGX_API)
+    ngx_api_set_cli_status(ses->client, NGX_API_CLI_REQUESTING,
+                           "Submitting an order for a certificate.");
+#endif
+
     NGX_ACME_SPAWN(run, cert_issue, (ses), rc);
 
     DBG_STATUS((ses->client, "cert_issue: %i", rc));
@@ -2273,7 +2418,7 @@ ngx_http_acme_send_request(ngx_http_acme_session_t *ses, ngx_uint_t method,
         return NGX_ERROR;
     }
 
-    if (ngx_http_acme_init_request(r, ses, method, ses->client->max_cert_size,
+    if (ngx_http_acme_init_request(r, ses, method, amcf->max_response_size,
                                    body)
         != NGX_OK)
     {
@@ -2357,6 +2502,13 @@ ngx_http_acme_hook_notify(ngx_http_acme_session_t *ses, ngx_acme_hook_t hook)
 
     ngx_log_error(NGX_LOG_INFO, ses->log, 0, "ACME hook %V: request sent",
                   &ngx_acme_hook_names[ses->hook]);
+
+#if (NGX_API)
+    ngx_api_set_cli_status(ses->client, NGX_API_CLI_REQUESTING,
+                           "A request was sent to the ACME hook (%V). "
+                           "Waiting for a reply.",
+                           &ngx_acme_hook_names[ses->hook]);
+#endif
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
@@ -2872,7 +3024,10 @@ ngx_http_acme_cert_issue(ngx_http_acme_session_t *ses)
 
     ngx_str_set(&s, "");
 
-    if (ngx_http_acme_share_key_auth(ses, &s, 0) == NGX_ERROR) {
+    if ((ses->client->challenge == NGX_AC_ALPN_01
+        && ngx_http_acme_share_alpn_data(ses, NULL, NULL) == NGX_ERROR)
+           || ngx_http_acme_share_key_auth(ses, &s, 0) == NGX_ERROR)
+    {
         ngx_log_error(NGX_LOG_ERR, ses->log, 0,
                       "couldn't clear ACME shared memory");
         NGX_ACME_TERMINATE(cert_issue, NGX_ERROR);
@@ -2890,6 +3045,11 @@ ngx_http_acme_cert_issue(ngx_http_acme_session_t *ses)
     ngx_log_error(NGX_LOG_INFO, ses->log, 0,
                   "polling for authorization status (%d sec)",
                   NGX_ACME_AUTHORIZATION_TIMEOUT);
+
+#if (NGX_API)
+    ngx_api_set_cli_status(ses->client, NGX_API_CLI_REQUESTING,
+                           "Polling for authorization status.");
+#endif
 
     ses->deadline = ngx_time() + NGX_ACME_AUTHORIZATION_TIMEOUT;
 
@@ -2935,6 +3095,11 @@ poll_status:
 finalize:
 
     DBG_STATUS((ses->client, "finalizing"));
+
+#if (NGX_API)
+    ngx_api_set_cli_status(ses->client, NGX_API_CLI_REQUESTING,
+                           "Finalizing the certificate.");
+#endif
 
     rc = ngx_data_object_get_str(ses->json, &ses->request_url, "finalize", 0);
 
@@ -3019,6 +3184,11 @@ certificate:
 
     DBG_STATUS((ses->client, "downloading certificate"));
 
+#if (NGX_API)
+    ngx_api_set_cli_status(ses->client, NGX_API_CLI_REQUESTING,
+                           "Downloading the certificate.");
+#endif
+
     if (ngx_data_object_get_str(ses->json, &ses->cert_url, "certificate", 0)
         != NGX_OK)
     {
@@ -3039,10 +3209,10 @@ certificate:
         NGX_ACME_TERMINATE(cert_issue, NGX_ERROR);
     }
 
-    t = ngx_http_acme_cert_validity(ses->client, 0, ses->body.data,
-                                    ses->body.len);
-
-    if (t != (time_t) NGX_ERROR && t != (time_t) NGX_DECLINED) {
+    if (ngx_http_acme_cert_validity(ses->client, 0, ses->body.data,
+                                    ses->body.len, &t)
+        == NGX_ACME_CERT_VALID)
+    {
         ses->client->expiry_time = t;
         ses->client->renew_time = t - ses->client->renew_before_expiry;
 
@@ -3111,11 +3281,32 @@ certificate:
         return NGX_ERROR;
     }
 
+    if (ses->body.len > ses->client->max_cert_size) {
+        ngx_log_error(NGX_LOG_CRIT, ses->log, 0,
+                      "certificate was downloaded but was too large to fit in "
+                      "shared memory, use \"max_cert_size\" with a value of "
+                      "at least %z", ses->body.len);
+        return NGX_ERROR;
+    }
+
     ngx_rwlock_wlock(&ses->client->sh_cert->lock);
 
     ngx_memcpy(&ses->client->sh_cert->data_start, ses->body.data,
                ses->body.len);
     ses->client->sh_cert->len = ses->body.len;
+
+#if (NGX_API)
+    ngx_api_set_cli_status_unlocked(&ses->client->sh_cert->cli,
+                                    NGX_API_CLI_READY,
+                                    "The certificate was obtained on %s, the "
+                                    "client is ready for renewal.",
+                                    strtok(ctime(&t), "\n"));
+
+    ses->client->sh_cert->cli.cert_status = NGX_ACME_CERT_VALID;
+
+    ses->client->sh_cert->cli.expiry_time = ses->client->expiry_time;
+    ses->client->sh_cert->cli.renew_time = ses->client->renew_time;
+#endif
 
     ngx_rwlock_unlock(&ses->client->sh_cert->lock);
 
@@ -3134,6 +3325,11 @@ ngx_http_acme_authorize(ngx_http_acme_session_t *ses)
     ngx_acme_client_t  *cli;
 
     NGX_ACME_BEGIN(authorize);
+
+#if (NGX_API)
+    ngx_api_set_cli_status(ses->client, NGX_API_CLI_REQUESTING,
+                           "Authorizing identifiers.");
+#endif
 
     ses->auths = ngx_data_object_get_value(ses->json, "authorizations", 0);
 
@@ -3249,7 +3445,9 @@ next_auth:
 
         if (ngx_data_object_get_str(item, &s, "type", 0) == NGX_OK
             && ((ngx_str_eq(&s, "http-01") && cli->challenge == NGX_AC_HTTP_01)
-               || (ngx_str_eq(&s, "dns-01") && cli->challenge == NGX_AC_DNS_01))
+               || (ngx_str_eq(&s, "dns-01") && cli->challenge == NGX_AC_DNS_01)
+               || (ngx_str_eq(&s, "tls-alpn-01")
+                   && cli->challenge == NGX_AC_ALPN_01))
             && ngx_data_object_get_str(item, &s, "status", 0) == NGX_OK
             && (ngx_str_eq(&s, "pending") || ngx_str_eq(&s, "processing")))
         {
@@ -3293,17 +3491,39 @@ challenge_found:
     ngx_snprintf(ses->key_auth.data, ses->key_auth.len, "%V.%V",
                  &ses->token, &ses->thumbprint);
 
-    if (cli->challenge == NGX_AC_DNS_01
-        && ngx_http_acme_sha256_base64url(ses, &ses->key_auth, &ses->key_auth)
-           != NGX_OK)
-    {
-        NGX_ACME_TERMINATE(authorize, NGX_ERROR);
-    }
+    switch (cli->challenge) {
 
-    if (ngx_http_acme_share_key_auth(ses, &ses->key_auth, ses->token.len)
-        == NGX_ERROR)
-    {
-        NGX_ACME_TERMINATE(authorize, NGX_ERROR);
+    case NGX_AC_DNS_01:
+        if (ngx_http_acme_sha256(ses, &ses->key_auth, 1, &ses->key_auth)
+            != NGX_OK)
+        {
+            NGX_ACME_TERMINATE(authorize, NGX_ERROR);
+        }
+
+        /* fall through */
+
+    case NGX_AC_HTTP_01:
+
+        if (ngx_http_acme_share_key_auth(ses, &ses->key_auth, ses->token.len)
+            == NGX_ERROR)
+        {
+            NGX_ACME_TERMINATE(authorize, NGX_ERROR);
+        }
+
+        break;
+
+    case NGX_AC_ALPN_01:
+        if (ngx_http_acme_sha256(ses, &ses->key_auth, 0, &s) != NGX_OK
+            || ngx_http_acme_share_alpn_data(ses, &ses->ident, &s)
+               == NGX_ERROR)
+        {
+            NGX_ACME_TERMINATE(authorize, NGX_ERROR);
+        }
+
+        break;
+
+    default:
+        /* unreachable */;
     }
 
     NGX_ACME_SPAWN(authorize, hook_notify, (ses, NGX_AH_ADD), rc);
@@ -3347,6 +3567,11 @@ challenge_found:
     ngx_log_error(NGX_LOG_INFO, ses->log, 0,
                   "polling for challenge status of \"%V\" (%d sec)",
                   &ses->ident, NGX_ACME_CHALLENGE_TIMEOUT);
+
+#if (NGX_API)
+    ngx_api_set_cli_status(ses->client, NGX_API_CLI_REQUESTING,
+                           "Authorizing the identifier \"%V\".", &ses->ident);
+#endif
 
     ses->deadline = ngx_time() + NGX_ACME_CHALLENGE_TIMEOUT;
 
@@ -3410,7 +3635,9 @@ ngx_http_acme_share_key_auth(ngx_http_acme_session_t *ses, ngx_str_t *key_auth,
 
     amcf = ngx_http_acme_get_main_conf();
 
-    if (!amcf->handle_challenge) {
+    if (!ngx_http_acme_challenge_is(amcf, NGX_AC_HTTP_01)
+        && !ngx_http_acme_challenge_is(amcf, NGX_AC_DNS_01))
+    {
         return NGX_DECLINED;
     }
 
@@ -3421,7 +3648,6 @@ ngx_http_acme_share_key_auth(ngx_http_acme_session_t *ses, ngx_str_t *key_auth,
                       "max_key_auth_size with a value of at least %uz",
                       key_auth->len);
         return NGX_ERROR;
-
     }
 
     ngx_rwlock_wlock(&amcf->sh->key_auth_lock);
@@ -3433,6 +3659,364 @@ ngx_http_acme_share_key_auth(ngx_http_acme_session_t *ses, ngx_str_t *key_auth,
     ngx_rwlock_unlock(&amcf->sh->key_auth_lock);
 
     return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_acme_share_alpn_data(ngx_http_acme_session_t *ses, ngx_str_t *ident,
+    ngx_str_t *token)
+{
+    ngx_str_t                   cert, key;
+    ngx_http_acme_sh_alpn_t    *alpn;
+    ngx_http_acme_main_conf_t  *amcf;
+
+    amcf = ngx_http_acme_get_main_conf();
+
+    if (!ngx_http_acme_challenge_is(amcf, NGX_AC_ALPN_01)) {
+        return NGX_DECLINED;
+    }
+
+    ngx_str_null(&cert);
+    ngx_str_null(&key);
+
+    if (ident != NULL && token != NULL
+        && ngx_http_acme_create_alpn_cert(ses, ident, token, &cert, &key)
+           != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    if (cert.len > sizeof(alpn->cert) || key.len > sizeof(alpn->key)) {
+        ngx_log_error(NGX_LOG_CRIT, ses->log, 0,
+                      "internal error: ACME ALPN certificate/key data is too "
+                      "large to fit in shared memory");
+        return NGX_ERROR;
+    }
+
+    alpn = amcf->alpn;
+
+    ngx_rwlock_wlock(&alpn->lock);
+
+    alpn->cert_len = cert.len;
+    ngx_memcpy(alpn->cert, cert.data, cert.len);
+
+    alpn->key_len = key.len;
+    ngx_memcpy(alpn->key, key.data, key.len);
+
+    ngx_rwlock_unlock(&alpn->lock);
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_acme_create_alpn_cert(ngx_http_acme_session_t *ses, ngx_str_t *ident,
+    ngx_str_t *token, ngx_str_t *cert, ngx_str_t *key)
+{
+    BIO                *bio;
+    X509               *x509;
+    u_char             *s;
+    size_t              n;
+    time_t              now;
+    BIGNUM             *bn;
+    EVP_PKEY           *k;
+    ngx_int_t           rc;
+    X509V3_CTX          ctx;
+    ASN1_OBJECT        *obj;
+    EVP_PKEY_CTX       *epc;
+    X509_EXTENSION     *ext;
+    ASN1_OCTET_STRING  *os;
+
+    rc = NGX_ERROR;
+
+    bio = NULL;
+    x509 = NULL;
+    bn = NULL;
+    k = NULL;
+    obj = NULL;
+    epc = NULL;
+    ext = NULL;
+    os = NULL;
+
+    epc = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+    if (!epc) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "EVP_PKEY_CTX_new_id() failed");
+        goto failed;
+    }
+
+    if (EVP_PKEY_keygen_init(epc) < 1) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "EVP_PKEY_keygen_init() failed");
+        goto failed;
+    }
+
+    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(epc, NID_X9_62_prime256v1)
+        < 1)
+    {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "EVP_PKEY_CTX_set_ec_paramgen_curve_nid() failed");
+        goto failed;
+    }
+
+    if (EVP_PKEY_keygen(epc, &k) < 1) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "EVP_PKEY_keygen() failed");
+        goto failed;
+    }
+
+    bn = BN_new();
+    if (!bn) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BN_new() failed");
+        goto failed;
+    }
+
+    if (!BN_rand(bn, 127, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BN_rand() failed");
+        goto failed;
+    }
+
+    now = time(NULL);
+
+    x509 = X509_new();
+    if (!x509) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_new() failed");
+        goto failed;
+    }
+
+    if (!X509_set_version(x509, 2)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_set_version() failed");
+        goto failed;
+    }
+
+    if (BN_to_ASN1_INTEGER(bn, X509_get_serialNumber(x509)) == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "BN_to_ASN1_INTEGER() failed");
+        goto failed;
+    }
+
+    if (ASN1_TIME_adj(X509_getm_notBefore(x509), now, -30, 0) == NULL
+        || ASN1_TIME_adj(X509_getm_notAfter(x509), now, 30, 0) == NULL)
+    {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "ASN1_TIME_adj() failed");
+        goto failed;
+    }
+
+    if (!X509_set_pubkey(x509, k)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_set_pubkey() failed");
+        goto failed;
+    }
+
+    n = ident->len + 5;
+
+    s = ngx_pnalloc(ses->pool, n);
+    if (s == NULL) {
+        goto failed;
+    }
+
+    ngx_snprintf(s, n, "DNS:%V%Z", ident);
+
+    /* id-pe-acmeIdentifier as per RFC 8737 sec 6.1 */
+    obj = OBJ_txt2obj("1.3.6.1.5.5.7.1.31", 1);
+    if (!obj) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "couldn't create ACME ALPN object");
+        goto failed;
+    }
+
+    X509V3_set_ctx(&ctx, x509, x509, NULL, NULL, 0);
+
+    ext = X509V3_EXT_nconf(NULL, &ctx, "subjectAltName", (const char *) s);
+    if (!ext) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509V3_EXT_nconf() failed");
+        goto failed;
+    }
+
+    if (!X509_add_ext(x509, ext, -1)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_add_ext() failed");
+        goto failed;
+    }
+
+    X509_EXTENSION_free(ext);
+
+    ext = X509V3_EXT_nconf(NULL, &ctx, "keyUsage",
+                                "critical, keyCertSign, digitalSignature");
+    if (!ext) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509V3_EXT_nconf() failed");
+        goto failed;
+    }
+
+    if (!X509_add_ext(x509, ext, -1)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_add_ext() failed");
+        goto failed;
+    }
+
+    X509_EXTENSION_free(ext);
+
+    ext = X509V3_EXT_nconf(NULL, &ctx, "basicConstraints",
+                           "critical, CA:TRUE");
+    if (!ext) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509V3_EXT_nconf() failed");
+        goto failed;
+    }
+
+    if (!X509_add_ext(x509, ext, -1)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_add_ext() failed");
+        goto failed;
+    }
+
+    X509_EXTENSION_free(ext);
+
+    ext = X509V3_EXT_nconf(NULL, &ctx, "subjectKeyIdentifier", "hash");
+    if (!ext) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509V3_EXT_nconf() failed");
+        goto failed;
+    }
+
+    if (!X509_add_ext(x509, ext, -1)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_add_ext() failed");
+        goto failed;
+    }
+
+    X509_EXTENSION_free(ext);
+
+    ext = X509V3_EXT_nconf(NULL, &ctx, "authorityKeyIdentifier",
+                           "keyid, issuer");
+    if (!ext) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509V3_EXT_nconf() failed");
+        goto failed;
+    }
+
+    if (!X509_add_ext(x509, ext, -1)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_add_ext() failed");
+        goto failed;
+    }
+
+    s = ngx_pnalloc(ses->pool, token->len + 2);
+    if (s == NULL) {
+        goto failed;
+    }
+
+    s[0] = 0x04;        /* OCTET_STRING */
+    s[1] = token->len;  /* LENGTH */
+
+    ngx_memcpy(s + 2, token->data, token->len);
+
+    os = ASN1_OCTET_STRING_new();
+    if (!os) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "ASN1_OCTET_STRING_new() failed");
+        goto failed;
+    }
+
+    if (!ASN1_OCTET_STRING_set(os, s, token->len + 2)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "ASN1_OCTET_STRING_set() failed");
+        goto failed;
+    }
+
+    X509_EXTENSION_free(ext);
+
+    ext = X509_EXTENSION_create_by_OBJ(NULL, obj, 1, os);
+    if (!ext) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "X509_EXTENSION_create_by_OBJ() failed");
+        goto failed;
+    }
+
+    if (!X509_add_ext(x509, ext, -1)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_add_ext() failed");
+        goto failed;
+    }
+
+    if (X509_sign(x509, k, EVP_sha256()) == 0) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "X509_sign() failed");
+        goto failed;
+    }
+
+    bio = BIO_new(BIO_s_mem());
+    if (bio == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BIO_new() failed");
+        goto failed;
+    }
+
+    if (PEM_write_bio_X509(bio, x509) == 0) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "PEM_write_bio_X509() failed");
+        goto failed;
+    }
+
+    cert->len = BIO_pending(bio) + 5;
+
+    cert->data = ngx_pnalloc(ses->pool, cert->len);
+    if (cert->data == NULL) {
+        goto failed;
+    }
+
+    ngx_memcpy(cert->data, "data:", 5);
+
+    BIO_read(bio, cert->data + 5, cert->len - 5);
+
+    BIO_free(bio);
+
+    bio = BIO_new(BIO_s_mem());
+    if (bio == NULL) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0, "BIO_new() failed");
+        goto failed;
+    }
+
+    if (!PEM_write_bio_PrivateKey(bio, k, NULL, NULL, 0, NULL, NULL)) {
+        ngx_ssl_error(NGX_LOG_ALERT, ses->log, 0,
+                      "PEM_write_bio_PrivateKey() failed");
+        goto failed;
+    }
+
+    key->len = BIO_pending(bio) + 5;
+
+    key->data = ngx_pnalloc(ses->pool, key->len);
+    if (key->data == NULL) {
+        goto failed;
+    }
+
+    ngx_memcpy(key->data, "data:", 5);
+
+    BIO_read(bio, key->data + 5, key->len - 5);
+
+    rc = NGX_OK;
+
+failed:
+
+    if (bio) {
+        BIO_free(bio);
+    }
+    if (ext) {
+        X509_EXTENSION_free(ext);
+    }
+    if (obj) {
+        ASN1_OBJECT_free(obj);
+    }
+    if (x509) {
+        X509_free(x509);
+    }
+    if (bn) {
+        BN_free(bn);
+    }
+    if (k) {
+        EVP_PKEY_free(k);
+    }
+    if (epc) {
+        EVP_PKEY_CTX_free(epc);
+    }
+    if (os) {
+        ASN1_OCTET_STRING_free(os);
+    }
+
+    return rc;
 }
 
 
@@ -3565,6 +4149,56 @@ ngx_http_acme_get_shared_key_auth(ngx_pool_t *pool, ngx_str_t *token,
     }
 
     ngx_rwlock_unlock(&sh->key_auth_lock);
+
+    return rc;
+}
+
+
+static ngx_int_t
+ngx_http_acme_get_shared_alpn_data(ngx_pool_t *pool, ngx_str_t *item,
+    ngx_uint_t need_key)
+{
+    ngx_int_t                   rc;
+    ngx_str_t                   val;
+    ngx_http_acme_sh_alpn_t    *alpn;
+    ngx_http_acme_main_conf_t  *amcf;
+
+    amcf = ngx_http_acme_get_main_conf();
+    if (amcf == NULL || amcf->alpn == NULL) {
+        return NGX_DECLINED;
+    }
+
+    alpn = amcf->alpn;
+
+    ngx_rwlock_rlock(&alpn->lock);
+
+    val.len = need_key ? alpn->key_len : alpn->cert_len;
+
+    if (val.len == 0) {
+        rc = NGX_DECLINED;
+        goto done;
+    }
+
+    if (item == NULL) {
+        rc = NGX_OK;
+        goto done;
+    }
+
+    val.data = ngx_pnalloc(pool, val.len);
+
+    if (val.data == NULL) {
+        rc = NGX_ERROR;
+        goto done;
+    }
+
+    ngx_memcpy(val.data, need_key ? alpn->key : alpn->cert, val.len);
+
+    *item = val;
+    rc = NGX_OK;
+
+done:
+
+    ngx_rwlock_unlock(&alpn->lock);
 
     return rc;
 }
@@ -3975,6 +4609,11 @@ ngx_http_acme_timer_handler(ngx_event_t *ev)
         if (!cli->session) {
             return;
         }
+
+#if (NGX_API)
+        ngx_api_set_cli_status(cli, NGX_API_CLI_REQUESTING,
+                               "Initializing the ACME account.");
+#endif
     }
 
     ses = cli->session;
@@ -4001,6 +4640,28 @@ ngx_http_acme_timer_handler(ngx_event_t *ev)
                               "will retry to obtain certificate on %s",
                               strtok(ctime(&cli->renew_time), "\n"));
             }
+
+#if (NGX_API)
+            ngx_rwlock_wlock(&cli->sh_cert->lock);
+
+            if (cli->enabled) {
+                ngx_api_set_cli_status_unlocked(&cli->sh_cert->cli,
+                                                NGX_API_CLI_FAILED,
+                                                "Certificate issuance has "
+                                                "failed (see logs for more "
+                                                "info).");
+
+                cli->sh_cert->cli.renew_time = cli->renew_time;
+
+            } else {
+                ngx_api_set_cli_status_unlocked(&cli->sh_cert->cli,
+                                                NGX_API_CLI_DISABLED,
+                                                "The client has been disabled "
+                                                "(see logs for more info).");
+            }
+
+            ngx_rwlock_unlock(&cli->sh_cert->lock);
+#endif
         }
 
         amcf->current = ngx_http_acme_nearest_client(amcf);
@@ -4176,6 +4837,9 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
     ngx_http_core_loc_conf_t    *clcf, *pclcf;
     ngx_http_acme_main_conf_t   *amcf;
     ngx_http_core_main_conf_t   *cmcf;
+#if (NGX_STREAM_ACME)
+    ngx_acme_client_ref_t       *scli;
+#endif
 
     amcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_acme_module);
 
@@ -4183,6 +4847,14 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
         /* no acme* directives in config - nothing to do */
         return NGX_OK;
     }
+
+#if (NGX_API)
+    if (ngx_api_add(cf->cycle, "/status/http", &ngx_api_acme_client_entry)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+#endif
 
     if (amcf->listen_ctx != NULL
         && ngx_http_acme_merge_listen_ctx(cf, amcf) != NGX_OK)
@@ -4207,10 +4879,10 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
             cli = cli_p[j];
 
             if (cli->server.len == 0) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "ACME client \"%V\" is not defined but "
-                                   "referenced in %V:%ui", &cli->name,
-                                   &cli->cf_filename, cli->cf_line);
+                ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                              "ACME client \"%V\" is not defined but "
+                              "referenced in %V:%ui", &cli->name,
+                              &cli->cf_filename, cli->cf_line);
                 return NGX_ERROR;
             }
 
@@ -4226,7 +4898,7 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
     if (ngx_create_dir(amcf->path.data, 0700) == NGX_FILE_ERROR) {
         err = ngx_errno;
         if (err != NGX_EEXIST) {
-            ngx_log_error(NGX_LOG_EMERG, ngx_cycle->log, err,
+            ngx_log_error(NGX_LOG_EMERG, cf->log, err,
                           ngx_create_dir_n " \"%s\" failed", amcf->path.data);
             return NGX_ERROR;
         }
@@ -4259,22 +4931,32 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
         cli = ((ngx_acme_client_t **) amcf->clients.elts)[i];
 
         if (cli->server.len == 0) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "ACME client \"%V\" is not defined but "
-                               "referenced in %V:%ui", &cli->name,
-                               &cli->cf_filename, cli->cf_line);
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                          "ACME client \"%V\" is not defined but "
+                          "referenced in %V:%ui", &cli->name,
+                          &cli->cf_filename, cli->cf_line);
             return NGX_ERROR;
         }
 
         if (cli->hook_clcf != NULL && cli->hook_clcf->handler == NULL) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "no request handler configured in the "
-                               "\"location\" block with ACME hook for client "
-                               "\"%V\"", &cli->name);
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                          "no request handler configured in the "
+                          "\"location\" block with ACME hook for client "
+                          "\"%V\"", &cli->name);
             return NGX_ERROR;
         }
 
+#if (NGX_STREAM_ACME)
+        scli = ngx_stream_acme_find_client(cf, &cli->name);
+
+        if (scli != NULL) {
+            scli->ref = cli;
+        }
+
+        if (cli->domains->nelts == 0 && scli == NULL) {
+#else
         if (cli->domains->nelts == 0) {
+#endif
             /*
              * The client is defined but not referenced in any of the server
              * blocks.
@@ -4282,25 +4964,25 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
 
             cli->enabled = 0;
 
-            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
-                               "ACME client \"%V\" is defined but not used",
-                               &cli->name);
+            ngx_log_error(NGX_LOG_WARN, cf->log, 0,
+                          "ACME client \"%V\" is defined but not used",
+                          &cli->name);
         }
 
         if (cli->enabled) {
             if (cli->server_url.addrs == NULL
-                && clcf->resolver->connections.nelts == 0)
+                && clcf->resolver->connections == NULL)
             {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "no resolver configured for resolving %V "
-                                   "at run time for ACME client \"%V\"",
-                                   &cli->server_url.host, &cli->name);
+                ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                              "no resolver configured for resolving %V "
+                              "at run time for ACME client \"%V\"",
+                              &cli->server_url.host, &cli->name);
 
                 return NGX_ERROR;
             }
 
             if (cli->hook_ctx == NULL) {
-                amcf->handle_challenge |= ((ngx_uint_t) 1 << cli->challenge);
+                ngx_http_acme_challenge_set(amcf, cli->challenge);
             }
         }
 
@@ -4362,11 +5044,17 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
          */
 
         if (cli->certificate_file_size > NGX_ACME_MAX_SH_FILE) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "size of file \"%V\" exceeds %d bytes",
-                               &cli->certificate_file.name,
-                               NGX_ACME_MAX_SH_FILE);
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                          "size of file \"%V\" exceeds %d bytes",
+                          &cli->certificate_file.name, NGX_ACME_MAX_SH_FILE);
             return NGX_ERROR;
+        }
+
+        if (cli->enabled && cli->max_cert_size == 0) {
+            cli->max_cert_size = ngx_calc_cert_size(cli->domains);
+
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cli->log, 0,
+                "acme max_cert_size calculated: %z", cli->max_cert_size);
         }
 
         if (cli->certificate_file_size > cli->max_cert_size) {
@@ -4384,7 +5072,7 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
         {
             err = ngx_errno;
             if (err != NGX_EEXIST) {
-                ngx_log_error(NGX_LOG_EMERG, ngx_cycle->log, err,
+                ngx_log_error(NGX_LOG_EMERG, cf->log, err,
                               ngx_create_dir_n " \"%s\" failed",
                               cli->path.data);
                 return NGX_ERROR;
@@ -4427,24 +5115,29 @@ ngx_http_acme_postconfiguration(ngx_conf_t *cf)
         }
     }
 
-    if (amcf->handle_challenge) {
-        if (amcf->handle_challenge & ((ngx_uint_t) 1 << NGX_AC_HTTP_01)) {
-            if (ngx_http_acme_add_http_listen(cmcf, amcf) != NGX_OK) {
-                return NGX_ERROR;
-            }
-
-            h = ngx_array_push(
-                             &cmcf->phases[NGX_HTTP_POST_READ_PHASE].handlers);
-            if (h == NULL) {
-                return NGX_ERROR;
-            }
-
-            *h = ngx_acme_http_challenge_handler;
+    if (ngx_http_acme_challenge_is(amcf, NGX_AC_HTTP_01)) {
+        if (ngx_http_acme_add_http_listen(cmcf, amcf) != NGX_OK) {
+            return NGX_ERROR;
         }
 
+        h = ngx_array_push(&cmcf->phases[NGX_HTTP_POST_READ_PHASE].handlers);
+        if (h == NULL) {
+            return NGX_ERROR;
+        }
+
+        *h = ngx_acme_http_challenge_handler;
+    }
+
+    if (ngx_http_acme_challenge_is(amcf, NGX_AC_HTTP_01)
+        || ngx_http_acme_challenge_is(amcf, NGX_AC_DNS_01))
+    {
         sz = sizeof(ngx_http_acme_sh_keyauth_t) + amcf->max_key_auth_size;
 
         shm_size += ngx_align(sz, NGX_ALIGNMENT);
+    }
+
+    if (ngx_http_acme_challenge_is(amcf, NGX_AC_ALPN_01)) {
+        shm_size += ngx_align(sizeof(ngx_http_acme_sh_alpn_t), NGX_ALIGNMENT);
     }
 
     /*
@@ -4635,16 +5328,25 @@ ngx_http_acme_init_file(ngx_conf_t *cf, ngx_str_t *path, ngx_str_t *filename,
 static ngx_int_t
 ngx_http_acme_shm_init(ngx_shm_zone_t *shm_zone, void *data)
 {
-    char                       *s, *s2;
+    char                       *s;
     size_t                      sz;
     u_char                     *p;
     time_t                      t, now;
     ngx_log_t                  *error_log;
-    ngx_uint_t                  i;
+    ngx_uint_t                  i, status;
     ngx_acme_client_t          *cli;
     ngx_http_acme_sh_cert_t    *shc;
     ngx_http_core_loc_conf_t   *pclcf;
     ngx_http_acme_main_conf_t  *amcf;
+
+    /* Array order must match the NGX_ACME_CERT_* constant definitions. */
+    static const char * const statuses[] = {
+        "valid",
+        "expired",
+        "no",
+        "invalid",
+        "couldn't parse",
+    };
 
     if (shm_zone->shm.exists) {
         /* Angie doesn't support Windows, so this probably can't happen... */
@@ -4671,16 +5373,24 @@ ngx_http_acme_shm_init(ngx_shm_zone_t *shm_zone, void *data)
     amcf->log.data = &amcf->log_ctx;
     amcf->log.handler = ngx_http_acme_log_error;
 
-    if (amcf->handle_challenge) {
-        amcf->sh = (ngx_http_acme_sh_keyauth_t *) shm_zone->shm.addr;
-        p = (u_char *) amcf->sh;
+    p = shm_zone->shm.addr;
+
+    if (ngx_http_acme_challenge_is(amcf, NGX_AC_HTTP_01)
+        || ngx_http_acme_challenge_is(amcf, NGX_AC_DNS_01))
+    {
+        amcf->sh = (ngx_http_acme_sh_keyauth_t *) p;
         sz = sizeof(ngx_http_acme_sh_keyauth_t) + amcf->max_key_auth_size;
 
         ngx_memzero(p, sz);
         p += ngx_align(sz, NGX_ALIGNMENT);
+    }
 
-    } else {
-        p = shm_zone->shm.addr;
+    if (ngx_http_acme_challenge_is(amcf, NGX_AC_ALPN_01)) {
+        amcf->alpn = (ngx_http_acme_sh_alpn_t *) p;
+        sz = sizeof(ngx_http_acme_sh_alpn_t);
+
+        ngx_memzero(p, sz);
+        p += ngx_align(sz, NGX_ALIGNMENT);
     }
 
     now = ngx_time();
@@ -4703,10 +5413,7 @@ ngx_http_acme_shm_init(ngx_shm_zone_t *shm_zone, void *data)
 
         cli->renew_time = now;
 
-        if (cli->renew_on_load && cli->enabled) {
-            s = "forced renewal of";
-
-        } else if (shc != NULL && shc->len != 0) {
+        if (shc != NULL && shc->len != 0) {
             if (ngx_http_acme_file_load(cli->log, &cli->certificate_file,
                                         shc->data_start, shc->len)
                 != NGX_OK)
@@ -4714,17 +5421,13 @@ ngx_http_acme_shm_init(ngx_shm_zone_t *shm_zone, void *data)
                 return NGX_ERROR;
             }
 
-            t = ngx_http_acme_cert_validity(cli, 1, shc->data_start, shc->len);
+            status = ngx_http_acme_cert_validity(cli, 1, shc->data_start,
+                                                      shc->len, &t);
 
-            if (t == (time_t) NGX_ERROR) {
-                s = "couldn't parse";
+            if (status == NGX_ACME_CERT_ERROR) {
                 shc->len = 0;
 
-            } else if (t == (time_t) NGX_DECLINED) {
-                s = "invalid";
-
-            } else {
-                s = "valid";
+            } else if (status == NGX_ACME_CERT_VALID && !cli->renew_on_load) {
                 cli->expiry_time = t;
                 cli->renew_time = t - cli->renew_before_expiry;
             }
@@ -4746,20 +5449,42 @@ ngx_http_acme_shm_init(ngx_shm_zone_t *shm_zone, void *data)
                 }
             }
 
-            s = "no";
+            status = NGX_ACME_CERT_MISSING;
         }
 
         if (cli->enabled) {
-            s2 = (cli->renew_time > now)
-                 ? strtok(ctime(&cli->renew_time), "\n")
-                   : "now";
+            s = (cli->renew_time > now)
+                ? strtok(ctime(&cli->renew_time), "\n")
+                  : "now";
+
+#if (NGX_API)
+            ngx_api_set_cli_status_unlocked(&shc->cli, NGX_API_CLI_READY,
+                                            "The client is ready to request "
+                                            "a certificate.");
+
+            shc->cli.expiry_time = cli->expiry_time;
+            shc->cli.renew_time = cli->renew_time;
+#endif
 
             ngx_log_error(NGX_LOG_NOTICE, cli->log, 0,
-                          "%s certificate, renewal scheduled %s", s, s2);
+                          "%s certificate, %srenewal scheduled %s",
+                          statuses[status],
+                          cli->renew_on_load ? "forced " : "", s);
 
         } else {
+
+#if (NGX_API)
+            if (shc != NULL) {
+                ngx_api_set_cli_status_unlocked(&shc->cli,
+                                                NGX_API_CLI_DISABLED,
+                                                "The client is disabled in "
+                                                "the configuration.");
+            }
+#endif
+
             ngx_log_error(NGX_LOG_NOTICE, cli->log, 0,
-                          "%s certificate, renewal disabled", s);
+                          "%s certificate, renewal disabled",
+                          statuses[status]);
         }
 
         amcf->current = NULL;
@@ -4774,16 +5499,20 @@ ngx_http_acme_shm_init(ngx_shm_zone_t *shm_zone, void *data)
                                    cli->certificate_file_size);
 
             p += ngx_align(sz, NGX_ALIGNMENT);
+
+#if (NGX_API)
+            shc->cli.cert_status = status;
+#endif
         }
     }
 
-    if ((amcf->handle_challenge & ((ngx_uint_t) 1 << NGX_AC_HTTP_01))
-        && amcf->http_port != NULL)
+    if (ngx_http_acme_challenge_is(amcf, NGX_AC_HTTP_01)
+        && amcf->http_port.addr != NULL)
     {
         ngx_http_acme_set_http_listening_handler(amcf);
     }
 
-    if (amcf->handle_challenge & ((ngx_uint_t) 1 << NGX_AC_DNS_01)) {
+    if (ngx_http_acme_challenge_is(amcf, NGX_AC_DNS_01)) {
         return ngx_http_acme_add_dns_listen(amcf);
     }
 
@@ -4800,7 +5529,7 @@ ngx_http_acme_set_http_listening_handler(ngx_http_acme_main_conf_t *amcf)
     ngx_cycle_t      *cycle;
     ngx_listening_t  *ls;
 
-    addr = amcf->http_port;
+    addr = amcf->http_port.addr;
     port = ngx_inet_get_port(addr->sockaddr);
     cycle = amcf->cf->cycle;
 
@@ -4832,7 +5561,7 @@ ngx_http_acme_create_session(ngx_acme_client_t *cli)
 
     log = cli->log;
 
-    pool = ngx_create_pool(cli->max_cert_size * 2, log);
+    pool = ngx_create_pool(NGX_DEFAULT_POOL_SIZE, log);
     if (pool == NULL) {
         return NULL;
     }
@@ -5175,6 +5904,7 @@ ngx_http_acme_create_main_conf(ngx_conf_t *cf)
 
     ngx_memcpy(&amcf->log, cf->log, sizeof(ngx_log_t));
     amcf->max_key_auth_size = NGX_CONF_UNSET_SIZE;
+    amcf->max_response_size = NGX_CONF_UNSET_SIZE;
 
     return amcf;
 }
@@ -5194,6 +5924,7 @@ ngx_http_acme_init_main_conf(ngx_conf_t *cf, void *conf)
     }
 
     ngx_conf_init_size_value(amcf->max_key_auth_size, 2 * 1024);
+    ngx_conf_init_size_value(amcf->max_response_size, 32 * 1024);
 
     return NGX_CONF_OK;
 }
@@ -5224,7 +5955,8 @@ ngx_http_acme_cert_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
     return ngx_acme_handle_cert_variable(r->pool, v,
-                                         (ngx_acme_client_t *) data);
+                                         (ngx_acme_client_t *) data,
+                                         r->connection->ssl);
 }
 
 
@@ -5232,7 +5964,9 @@ static ngx_int_t
 ngx_http_acme_cert_key_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
-    return ngx_acme_handle_cert_key_variable(v, (ngx_acme_client_t *) data);
+    return ngx_acme_handle_cert_key_variable(r->pool, v,
+                                             (ngx_acme_client_t *) data,
+                                             r->connection->ssl);
 }
 
 
@@ -5332,7 +6066,7 @@ ngx_http_acme_client(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     if (cli->server.len != 0) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "ACME client %V is already defined in %V:%ui",
+                           "duplicate ACME client \"%V\" defined in %V:%ui and",
                             &value[1], &cli->cf_filename, cli->cf_line);
 
         return NGX_CONF_ERROR;
@@ -5484,6 +6218,23 @@ ngx_http_acme_client(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             } else if (ngx_strcasecmp(value[i].data, (u_char *) "dns") == 0) {
                 cli->challenge = NGX_AC_DNS_01;
 
+            } else if (ngx_strcasecmp(value[i].data, (u_char *) "alpn") == 0) {
+#if (defined TLSEXT_TYPE_application_layer_protocol_negotiation               \
+     && !defined OPENSSL_IS_BORINGSSL && !defined OPENSSL_IS_AWSLC)
+                cli->challenge = NGX_AC_ALPN_01;
+#else
+                /*
+                 * BoringSSL has ALPN support but it's not usable for handling
+                 * ALPN challenges because it parses TLS extensions in a
+                 * different order and the ALPN select protocol callback
+                 * function doesn't get called.
+                 */
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "Angie was built with OpenSSL that lacks "
+                                   "proper ALPN support, ACME ALPN challenge "
+                                   "is not available");
+                return NGX_CONF_ERROR;
+#endif
             } else {
                 return "has an invalid \"challenge\" value";
             }
@@ -5728,7 +6479,7 @@ ngx_http_acme_merge_listen_ctx(ngx_conf_t *cf, ngx_http_acme_main_conf_t *amcf)
     }
 
     if (rv != NGX_CONF_ERROR) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "%s", rv);
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0, "%s", rv);
     }
 
     return NGX_ERROR;
@@ -5803,17 +6554,22 @@ ngx_http_acme_add_dns_listen(ngx_http_acme_main_conf_t *amcf)
 
     cycle = amcf->cf->cycle;
 
-    if (amcf->dns_port != NULL) {
-        addr = amcf->dns_port;
+    if (amcf->dns_port.addr != NULL) {
+        addr = amcf->dns_port.addr;
 
     } else {
         addr = &tmp;
-        ngx_parse_addr_port(cycle->pool, addr, (u_char *) "0.0.0.0:53", 10);
+
+        if (ngx_parse_addr_port(cycle->pool, addr, (u_char *) "0.0.0.0:53", 10)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
 
         if (geteuid() != 0) {
-            ngx_conf_log_error(NGX_LOG_WARN, amcf->cf, 0,
-                               "ACME module will use port 53 for DNS "
-                               "challenges, superuser required");
+            ngx_log_error(NGX_LOG_WARN, amcf->cf->log, 0,
+                          "ACME module will use port 53 for DNS "
+                          "challenges, superuser required");
         }
     }
 
@@ -5872,8 +6628,8 @@ ngx_http_acme_add_http_listen(ngx_http_core_main_conf_t *cmcf,
 
     cf = amcf->cf;
 
-    if (amcf->http_port != NULL) {
-        addr = amcf->http_port;
+    if (amcf->http_port.addr != NULL) {
+        addr = amcf->http_port.addr;
 
     } else {
         addr = ngx_palloc(cf->pool, sizeof(ngx_addr_t));
@@ -5881,15 +6637,20 @@ ngx_http_acme_add_http_listen(ngx_http_core_main_conf_t *cmcf,
             return NGX_ERROR;
         }
 
-        ngx_parse_addr_port(cf->pool, addr, (u_char *) "0.0.0.0:80", 10);
-
-        if (geteuid() != 0) {
-            ngx_conf_log_error(NGX_LOG_WARN, amcf->cf, 0,
-                               "ACME module will use port 80 for HTTP "
-                               "challenges, superuser required");
+        if (ngx_parse_addr_port(cf->pool, addr, (u_char *) "0.0.0.0:80", 10)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
         }
 
-        amcf->http_port = addr;
+        if (geteuid() != 0) {
+            ngx_log_error(NGX_LOG_WARN, amcf->cf->log, 0,
+                          "ACME module will use port 80 for HTTP "
+                          "challenges, superuser required");
+        }
+
+        amcf->http_port.addr = addr;
+        amcf->http_port.port_only = 1;
     }
 
     if (cmcf->ports != NULL) {
@@ -5905,12 +6666,13 @@ ngx_http_acme_add_http_listen(ngx_http_core_main_conf_t *cmcf,
 
                 if (caddr->opt.type == SOCK_STREAM
                     && port == ngx_inet_get_port(sockaddr)
-                    && (ngx_inet_wildcard(sockaddr)
+                    && (amcf->http_port.port_only
+                        || ngx_inet_wildcard(sockaddr)
                         || ngx_cmp_sockaddr(addr->sockaddr, addr->socklen,
                                             sockaddr, socklen,  0)
                            == NGX_OK))
                 {
-                    amcf->http_port = NULL;
+                    amcf->http_port.addr = NULL;
                     return NGX_OK;
                 }
             }
@@ -6094,7 +6856,7 @@ ngx_acme_client_add(ngx_conf_t *cf, ngx_str_t *name)
 
     cli->renew_before_expiry = 60 * 60 * 24 * 30;
     cli->retry_after_error = 60 * 60 * 2;
-    cli->max_cert_size = 8 * 1024;
+    /* cli->max_cert_size = 0; */
     cli->challenge = NGX_AC_HTTP_01;
     cli->renew_on_load = 0;
     cli->account_key.file.fd = NGX_INVALID_FILE;
@@ -6119,43 +6881,48 @@ ngx_http_acme_port(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     char  *p = conf;
 
-    u_char        buf[NGX_INT_T_LEN + 8];
-    ngx_str_t     value;
-    ngx_int_t     rc;
-    ngx_addr_t  **port;
+    ngx_str_t                   value;
+    ngx_int_t                   rc;
+    ngx_addr_t                 *addr;
+    ngx_http_acme_port_conf_t  *port_conf;
+    u_char                      buf[NGX_INT_T_LEN + 8];
 
-    port = (ngx_addr_t **) (p + cmd->offset);
+    port_conf = (ngx_http_acme_port_conf_t *) (p + cmd->offset);
 
-    if (*port != NULL) {
+    if (port_conf->addr != NULL) {
         return "is duplicate";
     }
 
-    *port = ngx_pcalloc(cf->pool, sizeof(ngx_addr_t));
-    if (*port == NULL) {
+    addr = ngx_palloc(cf->pool, sizeof(ngx_addr_t));
+    if (addr == NULL) {
         return NGX_CONF_ERROR;
     }
 
     value = ((ngx_str_t *) cf->args->elts)[1];
 
     if (ngx_atoi(value.data, value.len) != NGX_ERROR) {
+        port_conf->port_only = 1;
+
         value.len = ngx_snprintf(buf, sizeof(buf), "0.0.0.0:%V", &value) - buf;
         value.data = buf;
     }
 
-    rc = ngx_parse_addr_port(cf->pool, *port, value.data, value.len);
+    rc = ngx_parse_addr_port(cf->pool, addr, value.data, value.len);
     if (rc == NGX_ERROR) {
         return NGX_CONF_ERROR;
     }
 
     if (rc != NGX_OK) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "invalid port value \"%V\"",
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "invalid port value \"%V\"",
                            &((ngx_str_t *) cf->args->elts)[1]);
         return NGX_CONF_ERROR;
     }
 
-    if (ngx_inet_get_port((*port)->sockaddr) == 0) {
-        ngx_inet_set_port((*port)->sockaddr, *(uintptr_t *) cmd->post);
+    if (ngx_inet_get_port(addr->sockaddr) == 0) {
+        ngx_inet_set_port(addr->sockaddr, *(uintptr_t *) cmd->post);
     }
+
+    port_conf->addr = addr;
 
     return NGX_CONF_OK;
 }
@@ -6269,6 +7036,32 @@ ngx_clone_table_elt(ngx_pool_t *pool, ngx_str_t *dst,
 }
 
 
+static size_t
+ngx_calc_cert_size(ngx_array_t *domains)
+{
+    size_t      sz;
+    ngx_str_t   *s;
+    ngx_uint_t  i;
+
+    /*
+     * This calculation was obtained through trial and error
+     * and is not precise. Its only purpose is to ensure that
+     * the expected certificate size is sufficient to hold
+     * certificates with many domains.
+     */
+
+    sz = 0;
+
+    for (i = 0; i < domains->nelts; i++) {
+        s = &((ngx_str_t *) domains->elts)[i];
+
+        sz += s->len + 2;
+    }
+
+    return 8 * 1024 + (sz * 7) / 5;
+}
+
+
 ngx_array_t *
 ngx_acme_clients(ngx_conf_t *cf)
 {
@@ -6307,12 +7100,11 @@ ngx_acme_add_server_names(ngx_conf_t *cf, ngx_acme_client_t *cli,
         }
 
         if (ngx_http_acme_check_server_name(&sn[n],
-                                            cli->challenge != NGX_AC_HTTP_01))
+                                            cli->challenge == NGX_AC_DNS_01))
         {
-            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
-                               "unsupported domain format \"%V\" used "
-                               "by ACME client \"%V\", ignored", &name,
-                               &cli->name);
+            ngx_log_error(NGX_LOG_WARN, cf->log, 0,
+                          "unsupported domain format \"%V\" used "
+                          "by ACME client \"%V\", ignored", &name, &cli->name);
             continue;
         }
 
@@ -6348,13 +7140,11 @@ ngx_acme_add_server_names(ngx_conf_t *cf, ngx_acme_client_t *cli,
     }
 
     if (valid_domains == 0) {
-        cf->conf_file->line = cli->cf_line;
-        cf->conf_file->file.name = cli->cf_filename;
-
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "no valid domain name defined in server "
-                           "block at %s:%ui for ACME client \"%V\"",
-                           cf_file_name, cf_line, &cli->name);
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                      "no valid domain name defined in server "
+                      "block at %s:%ui for ACME client \"%V\" in %V:%ui",
+                      cf_file_name, cf_line, &cli->name,
+                      &cli->cf_filename, cli->cf_line);
 
         return NGX_ERROR;
     }
@@ -6364,7 +7154,8 @@ ngx_acme_add_server_names(ngx_conf_t *cf, ngx_acme_client_t *cli,
 
 
 static ngx_int_t
-ngx_acme_add_domain(ngx_acme_client_t *cli, ngx_str_t *domain) {
+ngx_acme_add_domain(ngx_acme_client_t *cli, ngx_str_t *domain)
+{
     ngx_str_t   *s;
     ngx_int_t    i;
     ngx_uint_t   wclen;
@@ -6433,11 +7224,22 @@ ngx_acme_add_domain(ngx_acme_client_t *cli, ngx_str_t *domain) {
 
 ngx_int_t
 ngx_acme_handle_cert_variable(ngx_pool_t *pool, ngx_variable_value_t *v,
-    ngx_acme_client_t *cli)
+    ngx_acme_client_t *cli, ngx_ssl_connection_t *ssl)
 {
+    unsigned int          len;
+    const unsigned char  *s;
 
     v->valid = 1;
     v->no_cacheable = 0;
+
+    if (ssl != NULL) {
+        SSL_get0_alpn_selected(ssl->connection, &s, &len);
+
+        if (ngx_acme_handle_alpn_variable(pool, v, cli, 0, s, len) == NGX_OK) {
+            return NGX_OK;
+        }
+    }
+
     v->not_found = (cli->sh_cert == NULL);
 
     if (v->not_found) {
@@ -6468,12 +7270,24 @@ ngx_acme_handle_cert_variable(ngx_pool_t *pool, ngx_variable_value_t *v,
 
 
 ngx_int_t
-ngx_acme_handle_cert_key_variable(ngx_variable_value_t *v,
-    ngx_acme_client_t *cli)
+ngx_acme_handle_cert_key_variable(ngx_pool_t *pool, ngx_variable_value_t *v,
+    ngx_acme_client_t *cli, ngx_ssl_connection_t *ssl)
 {
-    /* We can use the certificate key only when the certificate is available. */
+    unsigned int          len;
+    const unsigned char  *s;
+
     v->valid = 1;
     v->no_cacheable = 0;
+
+    if (ssl != NULL) {
+        SSL_get0_alpn_selected(ssl->connection, &s, &len);
+
+        if (ngx_acme_handle_alpn_variable(pool, v, cli, 1, s, len) == NGX_OK) {
+            return NGX_OK;
+        }
+    }
+
+    /* We can use the certificate key only when the certificate is available. */
     v->not_found = (cli->sh_cert == NULL);
 
     if (v->not_found) {
@@ -6504,3 +7318,268 @@ ngx_acme_handle_cert_key_variable(ngx_variable_value_t *v,
     return NGX_OK;
 }
 
+
+static ngx_int_t
+ngx_acme_handle_alpn_variable(ngx_pool_t *pool, ngx_http_variable_value_t *v,
+    ngx_acme_client_t *cli, ngx_uint_t is_key, const void *proto,
+    size_t proto_len)
+{
+    ngx_str_t  val;
+
+    v->not_found = 1;
+
+    if (proto_len != 10 || ngx_memcmp(proto, "acme-tls/1", 10) != 0) {
+        return NGX_DECLINED;
+    }
+
+    if (ngx_http_acme_get_shared_alpn_data(pool, &val, is_key) == NGX_OK) {
+        v->data = val.data;
+        v->len = val.len;
+
+        v->not_found = 0;
+        return NGX_OK;
+    }
+
+    return NGX_DECLINED;
+}
+
+
+ngx_int_t
+ngx_acme_select_alpn_proto(const unsigned char **out,
+    unsigned char *outlen, const unsigned char *in, unsigned int inlen)
+{
+    if (ngx_http_acme_get_shared_alpn_data(NULL, NULL, 0) != NGX_OK
+        || inlen != 11 || ngx_strncmp(in, "\012acme-tls/1", 11) != 0)
+    {
+        return NGX_DECLINED;
+    }
+
+    *out = (const unsigned char *) "acme-tls/1";
+    *outlen = 10;
+
+    return NGX_OK;
+}
+
+
+ngx_uint_t
+ngx_acme_is_alpn_needed(ngx_conf_t *cf)
+{
+    ngx_http_acme_main_conf_t  *amcf;
+
+    amcf = ngx_http_cycle_get_module_main_conf(cf->cycle, ngx_http_acme_module);
+
+    return (amcf != NULL) && ngx_http_acme_challenge_is(amcf, NGX_AC_ALPN_01);
+}
+
+
+#if (NGX_API)
+
+static void
+ngx_api_set_cli_status(ngx_acme_client_t *cli, ngx_uint_t status,
+    const char *fmt, ...)
+{
+    va_list                    args;
+
+    ngx_rwlock_wlock(&cli->sh_cert->lock);
+
+    va_start(args, fmt);
+    ngx_api_vset_cli_status_unlocked(&cli->sh_cert->cli, status, fmt, args);
+    va_end(args);
+
+    ngx_rwlock_unlock(&cli->sh_cert->lock);
+}
+
+
+static void
+ngx_api_set_cli_status_unlocked(ngx_api_acme_sh_client_t *sh,
+    ngx_uint_t status, const char *fmt, ...)
+{
+    va_list  args;
+
+    va_start(args, fmt);
+    ngx_api_vset_cli_status_unlocked(sh, status, fmt, args);
+    va_end(args);
+}
+
+
+static void
+ngx_api_vset_cli_status_unlocked(ngx_api_acme_sh_client_t *sh,
+    ngx_uint_t status, const char *fmt, va_list args)
+{
+    u_char  *p;
+
+    sh->cli_status = status;
+
+    p = ngx_vsnprintf(sh->details, sizeof(sh->details), fmt, args);
+
+    sh->details_len = p - sh->details;
+
+    if (sh->details_len == sizeof(sh->details)) {
+        /*
+         * If the value doesn't fit in the buffer, insert a triple dot
+         * at the end.
+         */
+        *--p = '.';
+        *--p = '.';
+        *--p = '.';
+    }
+}
+
+
+static ngx_int_t
+ngx_api_http_acme_handler(ngx_api_entry_data_t data, ngx_api_ctx_t *actx,
+    void *ctx)
+{
+    ngx_api_iter_ctx_t          ictx;
+    ngx_api_acme_sh_client_t    sh;
+    ngx_http_acme_main_conf_t  *amcf;
+
+    amcf = ngx_http_acme_get_main_conf();
+
+    ngx_memzero(&ictx, sizeof(ngx_api_iter_ctx_t));
+
+    ictx.entry.handler = ngx_api_object_handler;
+    ictx.entry.data.ents = ngx_api_acme_entries;
+
+    ictx.ctx = &sh;
+    ictx.elts = amcf->clients.elts;
+
+    return ngx_api_object_iterate(ngx_api_acme_iter, &ictx, actx);
+}
+
+
+static ngx_int_t
+ngx_api_acme_iter(ngx_api_iter_ctx_t *ictx, ngx_api_ctx_t *actx)
+{
+    ngx_acme_client_t          **cli_p;
+    ngx_api_acme_sh_client_t    *sh;
+    ngx_http_acme_main_conf_t   *amcf;
+
+    cli_p = ictx->elts;
+
+    amcf = ngx_http_acme_get_main_conf();
+
+    if (cli_p == ((ngx_acme_client_t **) amcf->clients.elts)
+                  + amcf->clients.nelts)
+    {
+        return NGX_DECLINED;
+    }
+
+    sh = ictx->ctx;
+
+    if ((*cli_p)->sh_cert == NULL) {
+        ngx_api_set_cli_status_unlocked(sh, NGX_API_CLI_DISABLED,
+                                        "The client is disabled in "
+                                        "the configuration.");
+        sh->expiry_time = 0;
+        sh->cert_status = NGX_ACME_CERT_MISSING;
+
+    } else {
+        ngx_rwlock_rlock(&(*cli_p)->sh_cert->lock);
+
+        ngx_memcpy(sh, &(*cli_p)->sh_cert->cli, sizeof(ngx_api_acme_sh_client_t));
+
+        ngx_rwlock_unlock(&(*cli_p)->sh_cert->lock);
+    }
+
+    ictx->entry.name = (*cli_p)->name;
+
+    ictx->elts = cli_p + 1;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_api_acme_client_renew_time_handler(ngx_api_entry_data_t data,
+    ngx_api_ctx_t *actx, void *ctx)
+{
+    ngx_time_t                 tp;
+    ngx_api_acme_sh_client_t  *sh;
+
+    sh = ctx;
+
+    if (sh->cli_status == NGX_API_CLI_DISABLED
+        || sh->cli_status == NGX_API_CLI_REQUESTING)
+    {
+        return NGX_DECLINED;
+    }
+
+    ngx_memzero(&tp, sizeof(ngx_time_t));
+
+    tp.sec = sh->renew_time;
+
+    data.tp = &tp;
+
+    return ngx_api_time_handler(data, actx, ctx);
+}
+
+
+static ngx_int_t
+ngx_api_acme_client_status_handler(ngx_api_entry_data_t data,
+    ngx_api_ctx_t *actx, void *ctx)
+{
+    ngx_api_acme_sh_client_t  *sh;
+
+    /* Array order must match the NGX_API_CLI_* constant definitions. */
+    static ngx_str_t statuses[] = {
+        ngx_string("disabled"),
+        ngx_string("ready"),
+        ngx_string("failed"),
+        ngx_string("requesting"),
+    };
+
+    sh = ctx;
+
+    data.str = &statuses[sh->cli_status];
+
+    return ngx_api_string_handler(data, actx, ctx);
+}
+
+
+static ngx_int_t
+ngx_api_acme_certificate_status_handler(ngx_api_entry_data_t data,
+    ngx_api_ctx_t *actx, void *ctx)
+{
+    ngx_api_acme_sh_client_t  *sh;
+
+    /* Array order must match the NGX_ACME_CERT_* constant definitions. */
+    static ngx_str_t statuses[] = {
+        ngx_string("valid"),
+        ngx_string("expired"),
+        ngx_string("missing"),
+        ngx_string("mismatch"),
+        ngx_string("error"),
+    };
+
+    sh = ctx;
+
+    if (sh->expiry_time != 0 && ngx_time() >= sh->expiry_time) {
+        data.str = &statuses[NGX_ACME_CERT_EXPIRED];
+
+    } else {
+        data.str = &statuses[sh->cert_status];
+    }
+
+    return ngx_api_string_handler(data, actx, ctx);
+}
+
+
+static ngx_int_t
+ngx_api_acme_client_details_handler(ngx_api_entry_data_t data,
+    ngx_api_ctx_t *actx, void *ctx)
+{
+    ngx_str_t                   s;
+    ngx_api_acme_sh_client_t  *sh;
+
+    sh = ctx;
+
+    s.data = sh->details;
+    s.len = sh->details_len;
+
+    data.str = &s;
+
+    return ngx_api_string_handler(data, actx, ctx);
+}
+
+#endif

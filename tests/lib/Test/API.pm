@@ -13,7 +13,7 @@ BEGIN {
 }
 
 use Test::More;
-use Test::Deep qw/any re hash_each subhashof cmp_details deep_diag/;
+use Test::Deep qw/any re hash_each subhashof cmp_details deep_diag ignore/;
 
 use Test::Utils qw/:json :re/;
 
@@ -22,6 +22,7 @@ sub api_status {
 	my $t = shift;
 
 	my $with_debug = $t->has_module('debug');
+	my $with_http_metric = $t->has_module('http_metric');
 
 	my $build;
 	if ($t->{_configure_args} =~ /--build=(?|'([^']+)'|(\S+))/) {
@@ -31,6 +32,32 @@ sub api_status {
 	my $config = $t->read_file('nginx.conf');
 
 	my $string_re = re(qr/^.+$/);
+
+	my @acme_clients_conf = $config =~ /acme_client\s+([^;]+);/g;
+
+	my $acme_client_default = {
+		state       => any(qw/disabled ready requesting failed/),
+		details     => $string_re,
+		certificate => any(qw/valid expired missing mismatch error/),
+	};
+
+	my %acme_clients;
+	foreach my $acme_client_conf (@acme_clients_conf) {
+		my %acme_client = %{ $acme_client_default };
+
+		my ($name) = $acme_client_conf =~ /^([^\s]+)/;
+
+		if ($acme_client_conf =~ /\s+enabled=off/) {
+			$acme_client{state}   = 'disabled';
+			$acme_client{details} =
+				'The client is disabled in the configuration.';
+			$acme_clients{$name} = \%acme_client;
+
+		} else {
+			$acme_client{next_run} = $TIME_RE;
+			$acme_clients{$name} = subhashof(\%acme_client);
+		}
+	}
 
 	my $ssl = {
 		failed     => $NUM_RE,
@@ -108,6 +135,7 @@ sub api_status {
 					updating => $cache_read,
 				})
 			),
+			($with_http_metric ? (metric_zones => hash_each(ignore())) : ()),
 			limit_conns => $limit_conns,
 			limit_reqs => hash_each({
 				delayed   => $NUM_RE,
@@ -156,6 +184,7 @@ sub api_status {
 					($with_debug ? (zone    => $string_re) : ()),
 				}),
 			),
+			acme_clients => \%acme_clients,
 		}),
 		resolvers => hash_each({
 			queries => {
@@ -329,6 +358,8 @@ sub traverse_api_status {
 			$expected_val = $expected->{val};
 		} elsif (ref $expected eq 'HASH') {
 			$expected_val = $expected->{$key};
+		} elsif (ref $expected eq 'Test::Deep::Ignore') {
+			$expected_val = ignore();
 		}
 
 		my ($res, $details)

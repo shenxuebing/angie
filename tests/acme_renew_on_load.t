@@ -15,6 +15,7 @@ use strict;
 use File::Copy;
 use File::Path qw/ make_path /;
 use POSIX qw/ strftime /;
+use Test::Deep qw/ cmp_deeply re /;
 use Test::More;
 
 BEGIN { use FindBin; chdir($FindBin::Bin); }
@@ -22,6 +23,7 @@ BEGIN { use FindBin; chdir($FindBin::Bin); }
 use lib 'lib';
 use Test::Nginx qw/ :DEFAULT /;
 use Test::Nginx::ACME;
+use Test::Utils qw/ get_json /;
 
 ###############################################################################
 
@@ -31,7 +33,7 @@ select STDOUT; $| = 1;
 eval { require Date::Parse; };
 plan(skip_all => 'Date::Parse not installed') if $@;
 
-my $t = Test::Nginx->new()->has(qw/acme http_ssl socket_ssl/)
+my $t = Test::Nginx->new()->has(qw/acme http_api http_ssl socket_ssl/)
 	->has_daemon('openssl');
 
 # XXX
@@ -60,8 +62,8 @@ my $pebble_port = port(14000);
 # uses a copy of the same valid certificate. Also, each server has an ACME
 # client to renew the certificate. Client 1 is configured to renew its
 # certificate straight away and Client 2 to renew its certificate when it
-# expires. Then the script waits until both certificates are renewed, and
-# checks if they were renewed as configured.
+# expires. Then the script waits until Client 1 has renewed its certificate, and
+# checks if Client 2 has scheduled its certificate for renewal as expected.
 
 $t->write_file_expand('nginx.conf', <<"EOF");
 %%TEST_GLOBALS%%
@@ -86,6 +88,15 @@ http {
     error_log acme.log notice;
 
     server {
+        listen          127.0.0.1:8080;
+        server_name     localhost;
+
+        location /status/ {
+            api /status/http/acme_clients/;
+        }
+    }
+
+    server {
         listen               $ssl_port ssl;
         server_name          angie-$client1.com;
 
@@ -95,7 +106,7 @@ http {
         acme                 $client1;
 
         location / {
-            return           200 "SECURED";
+            return           200 "SECURED 1";
         }
     }
 
@@ -109,7 +120,7 @@ http {
         acme                 $client2;
 
         location / {
-            return           200 "SECURED";
+            return           200 "SECURED 2";
         }
     }
 
@@ -120,59 +131,18 @@ EOF
 
 # Create the original certificate and copy it to the clients' directories.
 
-my $cert_db = "cert_db";
-my $cert_db_path = "$d/$cert_db";
-my $cert_db_filename = "certs.db";
+$t->create_certificate(domains => [$domain1, $domain2]);
+
 my $client_dir1 = "$d/acme_client/$client1";
 my $client_dir2 = "$d/acme_client/$client2";
-my $orig_cert = "$d/orig-certificate.pem";
-my $orig_key = "$d/orig-private.key";
+my $orig_cert = "$d/default.crt";
+my $orig_key = "$d/default.key";
 my $cert1 = "$client_dir1/certificate.pem";
 my $cert_key1 = "$client_dir1/private.key";
 my $cert2 = "$client_dir2/certificate.pem";
 my $cert_key2 = "$client_dir2/private.key";
 
-make_path($cert_db_path, $client_dir1, $client_dir2);
-$t->write_file("$cert_db/$cert_db_filename", '');
-
-$t->write_file('openssl.conf', <<EOF);
-[v3_req]
-authorityKeyIdentifier=keyid,issuer
-basicConstraints=CA:FALSE
-keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
-subjectAltName = \@alt_names
-[alt_names]
-DNS.1 = $domain1
-DNS.2 = $domain2
-[ca]
-default_ca = my_default_ca
-[my_default_ca]
-new_certs_dir = $cert_db_path
-database      = $cert_db_path/$cert_db_filename
-default_md    = default
-rand_serial   = 1
-policy        = my_ca_policy
-copy_extensions = copy
-email_in_dn   = no
-default_days  = 365
-[my_ca_policy]
-EOF
-
-# how long the original certificate lives before we renew it (sec)
-my $orig_validity_time = 15;
-
-my $enddate = strftime("%y%m%d%H%M%SZ", gmtime(time() + $orig_validity_time));
-
-system("openssl genrsa -out $d/ca.key 4096 2>/dev/null") == 0
-	&& system("openssl req -new -x509 -nodes -days 3650 "
-		. "-subj '/CN=Original Test CA' -key $d/ca.key -out $d/ca.crt") == 0
-	&& system("openssl req -new -nodes -out $d/csr.pem -newkey rsa:4096 "
-		. "-keyout $orig_key -subj '/CN=Original Test CA' 2>/dev/null") == 0
-	&& system("openssl ca -batch -notext -config $d/openssl.conf "
-		. "-extensions v3_req -startdate 250101080000Z -enddate $enddate "
-		. "-out $orig_cert -cert $d/ca.crt -keyfile $d/ca.key "
-		. "-in $d/csr.pem 2>/dev/null") == 0
-	|| die("Can't create the original certificate: $!");
+make_path($client_dir1, $client_dir2);
 
 copy($orig_cert, $cert1) && copy($orig_key, $cert_key1)
 	&& copy($orig_cert, $cert2) && copy($orig_key, $cert_key2)
@@ -187,67 +157,127 @@ $acme_helper->start_pebble({
 $t->try_run('variables in "ssl_certificate" and "ssl_certificate_key" '
 	. 'directives are not supported on this platform');
 
-$t->plan(4);
+$t->plan(4 + 2);
 
-my ($renewed1, $renewed2) = (0, 0);
+my $client2_enddate = `openssl x509 -in $cert2 -enddate -noout | cut -d= -f 2`;
 
-for (1 .. 480) {
-	if (!$renewed1) {
+chomp $client2_enddate;
+
+my $client2_next_run = strftime('%Y-%m-%dT%H:%M:%SZ',
+	gmtime(Date::Parse::str2time($client2_enddate) // 0));
+
+my $expected_acme_clients = {
+	$client1 => {
+		certificate => 'valid',
+		details     => re(qr/\.+/),
+		state       => 'requesting'
+	},
+	$client2 => {
+		certificate => 'valid',
+		details     => 'The client is ready to request a certificate.',
+		next_run    => $client2_next_run,
+		state       => 'ready'
+	}
+};
+cmp_deeply(get_json('/status/'), $expected_acme_clients, 'ACME API - initial');
+
+# Before we start renewal, just check that the original
+# certificate works fine.
+like(get("angie-$client1.com"), qr/SECURED 1/,
+	'original certificate works as expected');
+
+my $renewed = 0;
+
+for (1 .. 20) {
+	if (!$renewed) {
 		my $s = `openssl x509 -in $cert1 -issuer -noout`;
 
 		if ($s =~ /^issuer.*pebble/i) {
-			$renewed1 = time();
+			$renewed = time();
 		}
 	}
 
-	if (!$renewed2) {
-		my $s = `openssl x509 -in $cert2 -issuer -noout`;
+	last if $renewed;
 
-		if ($s =~ /^issuer.*pebble/i) {
-			$renewed2 = time();
-		}
-	}
-
-	last if $renewed1 && $renewed2;
-
-	select undef, undef, undef, 0.5;
+	select undef, undef, undef, 1;
 }
 
-ok($renewed1, "client1: certificate renewed");
-ok($renewed2, "client2: certificate renewed");
+ok($renewed, "client1: certificate renewed");
+
+my $acme_clients = get_json('/status/');
 
 $t->stop();
 
-my $s = $t->read_file('acme.log');
+my $acme_log = $t->read_file('acme.log');
 
 my $renewed_on_load = 0;
-if ($renewed1) {
-	$renewed_on_load = $s =~ /
-		forced\srenewal\sof\scertificate,\s
-		renewal\sscheduled\snow,\sACME\sclient:\stest1
+if ($renewed) {
+	$renewed_on_load = $acme_log =~ /
+		\svalid\scertificate,\s
+		forced\srenewal\sscheduled\snow,\sACME\sclient:\s$client1
 	/x;
 }
+
+my $client1_enddate = `openssl x509 -in $cert1 -noout -enddate | cut -d= -f 2`;
+
+my $client1_next_run = strftime('%Y-%m-%dT%H:%M:%SZ',
+	gmtime(Date::Parse::str2time($client1_enddate) // 0));
+
 ok($renewed_on_load, "client1: certificate renewed on load");
 
-my $renewed_as_scheduled = 0;
-if ($renewed2) {
-	my $ts = $1
-		if $s =~ /
-			valid\scertificate,\srenewal\sscheduled\s
-			([[:alpha:]]+\s+[[:alpha:]]+\s+\d+\s+\d+\:\d+\:\d+\s+\d+),\s
-			ACME\sclient:\stest2
-		/x;
+my $scheduled_for_renewal = 0;
+my $ts = $1
+	if $acme_log =~ /
+		\svalid\scertificate,\srenewal\sscheduled\s
+		([[:alpha:]]+\s+[[:alpha:]]+\s+\d+\s+\d+\:\d+\:\d+\s+\d+),\s
+		ACME\sclient:\s$client2
+	/x;
 
-	my $t1 = Date::Parse::str2time($ts) // 0;
+my $t1 = Date::Parse::str2time($ts) // 0;
 
-	$ts = `openssl x509 -in $orig_cert -noout -enddate`;
-	$ts =~ s/notAfter=//;
+$ts = `openssl x509 -in $orig_cert -noout -enddate | cut -d= -f 2`;
 
-	chomp $ts;
+chomp $ts;
 
-	my $t2 = Date::Parse::str2time($ts) // 0;
+my $t2 = Date::Parse::str2time($ts) // 0;
 
-	$renewed_as_scheduled = ($t1 != 0) && ($t1 == $t2);
+$scheduled_for_renewal = ($t1 != 0) && ($t1 == $t2);
+
+ok($scheduled_for_renewal, "client2: certificate renews on " . $ts);
+
+$client2_next_run = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($t2));
+
+my $details = 'The certificate was obtained on \w+ \w+\s+\d{1,2} '
+	. '\d{1,2}\:\d{2}\:\d{2} 20\d{2}, the client is ready for renewal\.';
+
+$expected_acme_clients = {
+	$client1 => {
+		certificate => 'valid',
+		details     => re(qr/$details/),
+		next_run    => $client1_next_run,
+		state       => 'ready'
+	},
+	$client2 => {
+		certificate => 'valid',
+		details     => 'The client is ready to request a certificate.',
+		next_run    => $client2_next_run,
+		state       => 'ready'
+	}
+};
+
+cmp_deeply($acme_clients, $expected_acme_clients, 'ACME API - renewal');
+
+###############################################################################
+
+sub get {
+    my ($host) = @_;
+    my $r = http(
+        "GET / HTTP/1.0\nHost: $host\n\n",
+        PeerAddr => '127.0.0.1:' . $ssl_port,
+        SSL => 1,
+        SSL_hostname => $host
+    )
+        or return "$@";
+    return $r;
 }
-ok($renewed_as_scheduled, "client2: certificate renewed as scheduled");
 

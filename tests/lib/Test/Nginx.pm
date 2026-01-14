@@ -27,18 +27,18 @@ BEGIN {
 ###############################################################################
 
 use File::Basename qw/ basename /;
-use File::Path qw/ rmtree /;
+use File::Path qw/ rmtree make_path /;
 use File::Spec qw//;
 use File::Temp qw/ tempdir /;
 use IO::Socket;
-use POSIX qw/ waitpid WNOHANG /;
+use POSIX qw/ waitpid WNOHANG strftime /;
 use Socket qw/ CRLF /;
 use Test::More qw//;
 
 use Test::Nginx::Config;
 use Test::API qw/ api_status traverse_api_status /;
-use Test::Control qw/wait_for_reload stop_pid/;
-use Test::Utils qw/trim/;
+use Test::Control qw/ wait_for_reload stop_pid worker_generations /;
+use Test::Utils qw/ trim /;
 
 ###############################################################################
 
@@ -51,7 +51,6 @@ sub new {
 	bless $self;
 
 	$self->{_pid} = $$;
-	$self->{_alerts} = 1;
 	$self->{_errors_to_skip} = {};
 
 	my $tname = (caller(0))[1];
@@ -81,24 +80,7 @@ sub DESTROY {
 	$self->stop_resolver();
 
 	if (Test::More->builder->expected_tests) {
-		local $Test::Nginx::TODO = 'alerts' unless $self->{_alerts};
-
-		my @alerts = $self->find_in_file('error.log', qr/.+\[alert\].+/);
-
-		local $Test::Nginx::TODO = 'alerts' if @alerts
-			&& $^O eq 'solaris'
-			&& ! grep { $_ !~ /phantom event/ } @alerts;
-
-		local $Test::Nginx::TODO = 'alerts' if @alerts
-			&& $^O eq 'MSWin32'
-			&& ! grep { $_ !~ qr/CloseHandle|TerminateProcess/ }
-				@alerts;
-
-		Test::More::is(join("\n", @alerts), '', 'no alerts');
-	}
-
-	if (Test::More->builder->expected_tests) {
-		foreach my $level (qw(crit emerg)) {
+		foreach my $level (qw(alert crit emerg)) {
 			my $errors_re = join('|',
 				@{ $self->{_errors_to_skip}{$level} // [] });
 
@@ -178,6 +160,8 @@ sub has_module($) {
 		perl	=> '--with-http_perl_module',
 		http_api
 			=> '(?s)^(?!.*--without-http_api_module)',
+		http_metric
+			=> '(?s)^(?!.*--without-http_metric_module)',
 		prometheus
 			=> '(?s)^(?!.*--without-http_prometheus_module)',
 		auth_request
@@ -285,6 +269,11 @@ sub has_module($) {
 
 	return 1 if $self->{_configure_args} =~ $re;
 
+	$self->{_active_modules} = `$NGINX -m 2>&1`
+		if !defined $self->{_active_modules};
+
+	return 1 if $self->{_active_modules} =~ /^ngx_$feature\_module$/m;
+
 	my %modules = (
 		http_geoip
 			=> 'ngx_http_geoip_module',
@@ -378,6 +367,19 @@ sub has_feature($) {
 		return !$@;
 	}
 
+	if ($feature eq 'reload') {
+		# see https://trac.nginx.org/nginx/ticket/1831
+		# perl >= 5.32 required
+		return 0 if $self->has_module('perl')
+			&& $] > 5.028002 && $] < 5.032000;
+		return 1;
+	}
+
+	$self->{_build_env} = `$NGINX --build-env 2>&1`
+		if !defined $self->{_build_env};
+
+	return 1 if $self->{_build_env} =~ /^\U$feature\E: 1$/m;
+
 	return 0;
 }
 
@@ -462,14 +464,6 @@ sub plan($) {
 	$plan += 1 if $ENV{TEST_ANGIE_VALGRIND};
 
 	Test::More::plan(tests => $plan + 5);
-
-	return $self;
-}
-
-sub todo_alerts() {
-	my ($self) = @_;
-
-	$self->{_alerts} = 0;
 
 	return $self;
 }
@@ -737,10 +731,8 @@ EOF
 	$self->write_file('test_hosts', $hosts);
 
 	my $d = $self->testdir();
-	$self->run_daemon('dnsmasq', '-C', "$d/dns.conf", '-k',
+	my $resolver_pid = $self->run_daemon('dnsmasq', '-C', "$d/dns.conf", '-k',
 		"--log-facility=$d/dns.log", '-q', "--pid-file=$d/dnsmasq.pid");
-
-	my $resolver_pid = $self->{_daemons}[-1];
 
 	$self->wait_for_resolver('127.0.0.1', $port, 'dns.example.com',
 		'127.0.0.1');
@@ -810,19 +802,19 @@ sub get_master_pid {
 }
 
 sub reload {
-	my ($self, $api_gen_url) = @_;
+	my ($self) = @_;
 
-	return $self unless $self->{_started};
-
-	my $generation;
-
-	if ($api_gen_url) {
-		$generation = http_get_value($api_gen_url);
-	}
+	return 0 unless $self->{_started};
 
 	my $pid = $self->get_master_pid();
 
-	# TODO: get current generation
+	my @generations = worker_generations($pid);
+	my $generation;
+	if (@generations == 1) {
+		$generation = $generations[0];
+	} else {
+		die "Something is wrong: too many generations of workers";
+	}
 
 	if ($^O eq 'MSWin32') {
 		my $testdir = $self->{_testdir};
@@ -837,24 +829,11 @@ sub reload {
 		kill 'HUP', $pid;
 	}
 
-	# TODO get rid of api_gen_url
-	if ($api_gen_url) {
-		my $new_generation;
-		for (1 .. 50) {
-			$new_generation = http_get_value($api_gen_url);
-			return if $new_generation == $generation + 1;
+	# wait until all old workers will start to shut down
+	my $reloaded = wait_for_reload($pid, $generation + 1);
 
-			select undef, undef, undef, 0.1;
-		}
-	}
-
-	# wait until all old workers will start shut down
-	# TODO pass new_generation
-	wait_for_reload($pid);
-
-	return $self;
+	return $reloaded;
 }
-
 
 sub stop() {
 	my ($self) = @_;
@@ -1011,7 +990,7 @@ sub run_daemon($;@) {
 	$self->{_daemons} = [] unless defined $self->{_daemons};
 	push @{$self->{_daemons}}, $pid;
 
-	return $self;
+	return $pid;
 }
 
 sub testdir() {
@@ -1220,9 +1199,14 @@ sub log_in {
 
 sub http_get($;%) {
 	my ($url, %extra) = @_;
+
+	my $host = (%extra && exists $extra{host})
+		? $extra{host}
+		: 'localhost';
+
 	return http(<<EOF, %extra);
 GET $url HTTP/1.0
-Host: localhost
+Host: $host
 
 EOF
 }
@@ -1440,18 +1424,205 @@ EOF
 	return $self;
 }
 
+###############################################################################
+
+# create_certificate()
+#
+# Creates a certificate–key pair. Accepts a hash of arguments
+# with the following members:
+#
+# cert
+#     Filename of the certificate to be created. If not specified,
+#     a default value is used (see the "name" parameter).
+#
+# key
+#     Filename of the certificate key to be created. If not specified,
+#     a default value is used (see the "name" parameter).
+#
+# dir
+#     Directory within the current test directory where the certificate
+#     and key are placed. If not specified, the current test directory
+#     is used.
+#
+# name
+#     Generic name used in various places. If "cert" is not specified,
+#     this value is used as the certificate filename with the .crt
+#     extension. If "key" is not specified, it is used as the key
+#     filename with the .key extension. This value is also used in
+#     certificate database names, CSR filenames, etc.
+#
+#     Default: 'default'
+#
+# domains
+#     List of domains to include in the Subject Alternative Name
+#     extension.
+#
+#     Default: ['localhost']
+#
+# startdate
+#     Time when the certificate becomes valid, represented as seconds
+#     since the Epoch. By default, the current time (the return value
+#     of time()) is used.
+#
+# lifetime
+#     Validity period of the certificate in seconds. Ignored if "enddate"
+#     is specified.
+#
+#     Default: 2_592_000 (30 days)
+#
+# enddate
+#     Time when the certificate becomes invalid, represented as seconds
+#     since the Epoch. If this parameter is specified, the "lifetime"
+#     parameter is ignored.
+#
+#     Default: startdate + lifetime
+#
+# subj
+#     Subject field of the certificate.
+#
+#     Default: '/CN=Angie Test CA'
+#
+# Examples.
+#
+# The following code creates a certificate "test.crt"
+# and a corresponding key "test.key" in the current test
+# directory.
+#
+#     my $t = Test::Nginx->new();
+#     $t->create_certificate(name => 'test');
+#
+# The following code creates a certificate "certificate.pem"
+# for the domains "1.example.com" and "2.example.com"
+# with a validity period of 10 seconds and a corresponding key
+# "private.key" in the directory "acme_client/test".
+#
+#     my $t = Test::Nginx->new();
+#     $t->create_certificate(
+#         cert     => 'certificate.pem',
+#         key      => 'private.key',
+#         dir      => 'acme_client/test',
+#         lifetime => 10,
+#         domains  => [qw/1.example.com 2.example.com/],
+#     );
+#
+sub create_certificate {
+	my ($self, %params) = @_;
+
+	my $name = $params{name} // 'default';
+	my $cert = $params{cert} // "$name.crt";
+	my $key = $params{key} // "$name.key";
+	my @domains = @{$params{domains} // ['localhost']};
+	my $startdate = $params{startdate} // time();
+	my $lifetime = $params{lifetime} // 60 * 60 * 24 * 30;
+	my $enddate = $params{enddate} // $startdate + $lifetime;
+	my $subj = $params{subj} // '/CN=Angie Test CA';
+
+	my $testdir = $self->{_testdir};
+	my $cert_db = "${name}_cert_db";
+	my $cert_db_path = "$testdir/$cert_db";
+	my $cert_db_filename = "certs.db";
+	my $dir = $testdir;
+
+	if (defined $params{dir}) {
+		$dir .= "/$params{dir}";
+		make_path($dir);
+	}
+
+	make_path($cert_db_path);
+	# a DB file must exist, even if it's empty
+	$self->write_file("$cert_db/$cert_db_filename", '');
+
+	my $alt_names = '';
+
+	my $i = 1;
+
+	for my $s (@domains) {
+		$alt_names .= "DNS.$i = $s\n";
+		$i++;
+	}
+
+	my $ossl_conf = "${name}_ossl.conf";
+
+	$self->write_file($ossl_conf, <<EOF);
+[v3_req]
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+subjectAltName = \@alt_names
+
+[alt_names]
+$alt_names
+[ca]
+default_ca = my_default_ca
+
+[my_default_ca]
+new_certs_dir = $cert_db_path
+database      = $cert_db_path/$cert_db_filename
+default_md    = default
+rand_serial   = 1
+policy        = my_ca_policy
+copy_extensions = copy
+email_in_dn   = no
+default_days  = 365
+
+[my_ca_policy]
+EOF
+
+	my $startdate_str = strftime('%y%m%d%H%M%SZ', gmtime($startdate));
+	my $enddate_str = strftime('%y%m%d%H%M%SZ', gmtime($enddate));
+
+	my $ca_cert_filename = "$testdir/${name}_ca.crt";
+	my $ca_key_filename = "$testdir/${name}_ca.key";
+	my $csr_filename = "$testdir/${name}_csr.pem";
+	my $cert_filename = "$dir/$cert";
+	my $key_filename = "$dir/$key";
+
+	if (!-f $ca_key_filename || !-f $ca_cert_filename) {
+		system("openssl genrsa -out $ca_key_filename 4096 2>/dev/null")
+			== 0
+		|| die("Can't create CA certificate key $ca_key_filename: $!");
+
+		system("openssl req -new -x509 -nodes -days 3650 -subj '$subj' "
+			. "-key $ca_key_filename -out $ca_cert_filename")
+			== 0
+		|| die("Can't create CA certificate $ca_cert_filename: $!");
+	}
+
+	system("openssl req -new -nodes -out $csr_filename "
+		. "-newkey rsa:4096 -keyout $key_filename "
+		. "-subj '$subj' 2>/dev/null")
+		== 0
+	|| die("Can't create CSR $csr_filename: $!");
+
+	system("openssl ca -batch -notext -config $testdir/$ossl_conf "
+		. "-extensions v3_req "
+		. "-startdate $startdate_str -enddate $enddate_str "
+		. "-out $cert_filename -cert $ca_cert_filename "
+		. "-keyfile $ca_key_filename -in $csr_filename 2>/dev/null")
+		== 0
+	|| die("Can't create certificate $cert_filename: $!");
+
+	return $self;
+}
+
+###############################################################################
+
 # runs tests. allows to run a specific test case
 # defined by the environment variable TEST_ANGIE_TC
 # usage: TEST_ANGIE_TC='<test_case_name>'
 sub run_tests {
 	my ($self, $test_cases) = @_;
 
-	while (my ($test_case_name, $test_case_sub) = each %{$test_cases}) {
-		my $test_case_params = {};
-		if (ref $test_case_sub eq 'HASH') {
-			$test_case_params = $test_case_sub->{test_params};
-			$test_case_sub    = $test_case_sub->{test_sub};
+	while (my ($test_case_name, $test_case) = each %{ $test_cases }) {
+		my ($test_case_sub, $test_case_params);
+
+		if (ref $test_case eq 'HASH') {
+			$test_case_sub  = delete $test_case->{test_sub};
+			$test_case_params = $test_case->{test_params};
+		} else {
+			$test_case_sub = $test_case;
 		}
+		$test_case_params->{test_case_name} = $test_case_name;
 
 		SKIP: {
 			Test::More::skip "subtest '$test_case_name'", 1

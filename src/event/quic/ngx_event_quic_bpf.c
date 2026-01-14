@@ -946,6 +946,7 @@ ngx_quic_bpf_add_worker_socket(ngx_cycle_t *cycle, ngx_quic_bpf_group_t *grp,
 {
     int                        value;
     ngx_uint_t                 i, n;
+    ngx_addr_t                 addr;
     ngx_socket_t               s;
     ngx_quic_bpf_listening_t  *bls;
 
@@ -1009,6 +1010,31 @@ ngx_quic_bpf_add_worker_socket(ngx_cycle_t *cycle, ngx_quic_bpf_group_t *grp,
     }
 #endif
 
+#if (NGX_HAVE_INET6 && defined IPV6_V6ONLY)
+
+    if (ls->sockaddr->sa_family == AF_INET6) {
+        int  ipv6only;
+
+        ipv6only = ls->ipv6only;
+
+        if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY,
+                       (const void *) &ipv6only, sizeof(int))
+            == -1)
+        {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+                          "setsockopt(IPV6_V6ONLY) %V failed, ignored",
+                          &ls->addr_text);
+        }
+    }
+
+#endif
+
+    addr.sockaddr = ls->sockaddr;
+    addr.socklen = ls->socklen;
+    addr.name = ls->addr_text;
+
+    ngx_configure_quic_socket(s, &addr, cycle->log);
+
     if (bind(s, ls->sockaddr, ls->socklen) == -1) {
         ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_socket_errno,
                       "quic bpf bind() failed");
@@ -1032,7 +1058,7 @@ ngx_quic_bpf_add_worker_socket(ngx_cycle_t *cycle, ngx_quic_bpf_group_t *grp,
 
     bls = grp->listening.elts;
     bls[ls->worker].fd = s;
-    bls[ls->worker].listening  = ls;
+    bls[ls->worker].listening = ls;
 
     return NGX_OK;
 

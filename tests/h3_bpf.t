@@ -57,10 +57,6 @@ my $t = Test::Nginx->new()
 	->has(qw/http http_ssl http_v3 quic_bpf rewrite socket_ssl_alpn cryptx/)
 	->has_daemon('openssl')->prepare_ssl();
 
-# see https://trac.nginx.org/nginx/ticket/1831
-plan(skip_all => "perl >= 5.32 required")
-	if ($t->has_module('perl') && $] < 5.032000);
-
 sub generate_config {
 	my ($t, $nworkers) = @_;
 
@@ -89,9 +85,6 @@ http {
         location / {
             return 200 \$pid;
         }
-        location /api/ {
-            api /;
-        }
     }
 }
 
@@ -116,31 +109,46 @@ our $last_port = BASE_PORT;
 our $passed = 0;
 
 subtest 'reload test: 8 -> 8' => sub {
+	plan(skip_all => 'reload is not working (perl >= 5.32 required)')
+		unless $t->has_feature('reload');
+
 	my $worker_map = quic_reload($t, START_WORKERS, START_WORKERS);
-	$passed = ok(defined $worker_map, 'reload ok');
+	ok(defined $worker_map, 'reload ok');
 };
 
+$passed = (Test::More->builder->summary)[-1];
 subtest 'reload test: 8 -> 3' => sub {
+	plan(skip_all => 'reload is not working (perl >= 5.32 required)')
+		unless $t->has_feature('reload');
+
 	return unless $passed;
 
 	my $worker_map = quic_reload($t, START_WORKERS, 3);
-	$passed = ok(defined $worker_map, 'reload ok');
+	ok(defined $worker_map, 'reload ok');
 };
 
-my $worker_map;
+$passed = (Test::More->builder->summary)[-1];
 subtest 'reload test: 3 -> 4' => sub {
+	plan(skip_all => 'reload is not working (perl >= 5.32 required)')
+		unless $t->has_feature('reload');
+
 	return unless $passed;
 
-	$worker_map = quic_reload($t, 3, 4);
-	$passed = ok(defined $worker_map, 'reload ok');
+	my $worker_map = quic_reload($t, 3, 4);
+	ok(defined $worker_map, 'reload ok');
 };
 
 # now perform binary upgrade
-subtest 'upgrade test: 4 -> 6' => sub {
+
+$passed = (Test::More->builder->summary)[-1];
+my @details = Test::More->builder->details;
+
+my $nworkers = ($details[-1]{type} eq 'skip') ? START_WORKERS : 4;
+subtest "upgrade test: $nworkers -> 6" => sub {
 	return unless $passed;
 
-	my $rc = quic_upgrade($t, 4, 6, $worker_map);
-	$passed = ok(defined $rc, 'upgrade ok');
+	my $rc = quic_upgrade($t, $nworkers, 6);
+	ok(defined $rc, 'upgrade ok');
 };
 
 sub quic_reload {
@@ -173,8 +181,7 @@ sub quic_reload {
 		generate_config($t, $new_nworkers);
 	}
 
-	$t->reload('/api/status/angie/generation');
-	note('reload done');
+	ok($t->reload(), 'reload done');
 	show_angie_procs(angie_ps(), 'after reload');
 
 	# we are ready to perform the tests:
@@ -216,13 +223,15 @@ sub quic_reload {
 }
 
 sub quic_upgrade {
-	my ($t, $old_nworkers, $new_nworkers, $worker_map) = @_;
+	my ($t, $old_nworkers, $new_nworkers) = @_;
 
 	note("======= UPGRADE TEST: $old_nworkers -> $new_nworkers ========");
 
+	my $tbl = get_worker_port_matches($old_nworkers);
+
 	# first, create some long connections to existing workers
 
-	my $pre_upg_conns = catch_workers($new_nworkers, $worker_map);
+	my $pre_upg_conns = catch_workers($new_nworkers, $tbl);
 	ok(defined $pre_upg_conns, 'test preparation ok: long connections started')
 		or return;
 

@@ -12,13 +12,21 @@
 # The script first tests clients that handle challenges without hook procedures
 # by running pebble and challtestsrv with the appropriate parameters for each
 # challenge type and waiting until the clients have received their
-# certificates (steps 1 & 2). It then tests clients that use hook procedures,
+# certificates (steps 1, 2 & 3). It then tests clients that use hook procedures,
 # again launching pebble and challtestsrv with the necessary parameters,
-# along with the hook handling process (step 3).
+# along with the hook handling process (step 4).
 #
 # In some cases, an ACME client may begin updating before the required servers
 # are ready; if this happens, the client will encounter an error and
 # automatically retry the update based on its configuration.
+#
+# TODO: There wouldn't be any retries at all if ACME server and clients
+# were running synchronously. Either the ACME client or the ACME server
+# needs to be redesigned.
+# Another option is to play around with certificates - provide it with
+# certificates with a known lifetime, which will ensure it doesn't start
+# the next update before a certain time. But again, this doesn't guarantee
+# it will have time to update within that time. So, we need to think about it.
 #
 # The test is considered successful when all ACME clients obtain their
 # certificates as expected.
@@ -49,8 +57,12 @@ select STDOUT; $| = 1;
 eval { require FCGI; };
 plan(skip_all => 'FCGI not installed') if $@;
 
+plan(skip_all => 'long test') unless $ENV{TEST_ANGIE_UNSAFE};
+
 my $t = Test::Nginx->new()->has(qw/acme http_ssl socket_ssl/)
 	->has_daemon('openssl');
+
+my $has_alpn = !$t->has_module('BoringSSL|AWS-LC|LibreSSL');
 
 # XXX
 my $dns_port = 11053;
@@ -66,6 +78,8 @@ my $d = $t->testdir();
 my $hook_port = port(9000);
 my $pebble_port = port(14000);
 my $http_port = port(5003);
+my $angie_http_port = port(5080);
+my $tls_port = port(5001);
 my $challtestsrv_mgmt_port = port(9055);
 
 my (@clients, @servers);
@@ -77,11 +91,16 @@ my @keys = (
 
 my @challenges = ('http', 'dns');
 
-my $server_count = @challenges * 2;
+if ($has_alpn) {
+	push @challenges, 'alpn';
+}
+
+my $server_count = @challenges * @keys;
 
 my $domain_count = 1;
 my $http_chlg_count = 0;
 my $dns_chlg_count = 0;
+my $alpn_chlg_count = 0;
 my $hook_chlg_count = 0;
 
 for my $n (1 .. $server_count) {
@@ -108,6 +127,7 @@ for my $n (1 .. $server_count) {
 		$domain_count++;
 	}
 
+	# Configure the second half of the servers to use hooks.
 	my $hook = int(($n - 1) / ($server_count / 2));
 
 	for my $key (@keys) {
@@ -127,6 +147,7 @@ for my $n (1 .. $server_count) {
 
 		$http_chlg_count += ($chlg eq 'http' and !$hook);
 		$dns_chlg_count += ($chlg eq 'dns' and !$hook);
+		$alpn_chlg_count += ($chlg eq 'alpn' and !$hook);
 		$hook_chlg_count += $hook;
 	}
 
@@ -170,10 +191,19 @@ for my $e (@servers) {
 
 	$conf_servers .=
 "    server {
-        listen       localhost:%%PORT_8080%%;
+        listen       localhost:%%PORT_8443%% @{[ $has_alpn ? 'ssl' : '' ]};
         server_name  @{ $e->{domains} };
 
 ";
+
+	if ($has_alpn) {
+		for my $cli (@{ $e->{clients} }) {
+			$conf_servers .= "        ssl_certificate     \$acme_cert_$cli->{name};\n";
+			$conf_servers .= "        ssl_certificate_key \$acme_cert_key_$cli->{name};\n";
+		}
+
+		$conf_servers .= "\n";
+	}
 
 	for my $cli (@{ $e->{clients} }) {
 		$conf_servers .= "        acme $cli->{name};\n";
@@ -201,7 +231,7 @@ http {
     #resolver localhost:$dns_port ipv6=off;
 
     acme_dns_port $angie_dns_port;
-    acme_http_port $http_port;
+    acme_http_port $angie_http_port;
 
 $conf_clients
 $conf_servers
@@ -236,16 +266,17 @@ $acme_helper->start_challtestsrv({
 
 $acme_helper->start_pebble({
 	pebble_port => $pebble_port,
-	http_port => $http_port
+	http_port => $angie_http_port
 });
 
-$t->run();
+$t->try_run('variables in "ssl_certificate" and "ssl_certificate_key" '
+	. 'directives are not supported on this platform');
 
 $t->plan(scalar @clients + 2);
 
 my $renewed_count = 0;
 my $n = 0;
-my $cli_timeout = 360;
+my $cli_timeout = 60;
 my $loop_start = time();
 
 for (1 .. $cli_timeout * $http_chlg_count) {
@@ -299,7 +330,7 @@ $acme_helper->start_pebble({
 
 
 $n = 0;
-$cli_timeout = 360;
+$cli_timeout = 60;
 $loop_start = time();
 
 for (1 .. $cli_timeout * $dns_chlg_count) {
@@ -351,13 +382,74 @@ $acme_helper->start_challtestsrv({
 
 $acme_helper->start_pebble({
 	pebble_port => $pebble_port,
-	http_port => $http_port
+	tls_port => port(8443), # XXX same port number in nginx.conf
+});
+
+
+$n = 0;
+$cli_timeout = 60;
+$loop_start = time();
+
+for (1 .. $cli_timeout * $alpn_chlg_count) {
+
+	for my $cli (@clients) {
+		next if ($cli->{renewed}
+			or $cli->{challenge} ne 'alpn'
+			or $cli->{hook});
+
+		my $cert_file = "$d/acme_client/$cli->{name}/certificate.pem";
+
+		if (-s $cert_file) {
+			my $s = `openssl x509 -in $cert_file -enddate -noout|cut -d= -f 2`;
+
+			next if $s eq '';
+
+			chomp $s;
+
+			$renewed_count++;
+			$n++;
+
+			note("$0: $cli->{name} renewed certificate "
+				. " ($renewed_count of " . @clients . ")");
+
+			$cli->{renewed} = 1;
+			$cli->{enddate} = $s;
+		}
+	}
+
+	last if $n == $alpn_chlg_count;
+
+	if (!$n && time() - $loop_start > $cli_timeout) {
+		# If none of the clients has renewed during this time,
+		# then there's probably no need to wait longer.
+		diag("$0: Quitting on timeout ...");
+		goto bad;
+	}
+
+	select undef, undef, undef, 0.5;
+}
+
+$acme_helper->stop_pebble();
+$acme_helper->stop_challtestsrv();
+
+# Step 4
+
+$acme_helper->start_challtestsrv({
+	mgmt_port => $challtestsrv_mgmt_port,
+	http_port => $http_port,
+	tlsalpn_port => $tls_port,
+});
+
+$acme_helper->start_pebble({
+	pebble_port => $pebble_port,
+	http_port => $http_port,
+	tls_port => $tls_port,
 });
 
 $t->run_daemon(\&hook_handler, $t, $hook_port);
 
 $n = 0;
-$cli_timeout = 360;
+$cli_timeout = 60;
 $loop_start = time();
 
 for (1 .. $cli_timeout * $hook_chlg_count) {
@@ -411,7 +503,7 @@ my $s = '';
 $s = $t->read_file('uri.txt') if -f $t->testdir() . '/uri.txt';
 
 my $used_uri = $s =~ /URI:/;
-my $bad_uri = !$used_uri or ($s =~ /URI: 0/);
+my $bad_uri = !$used_uri || ($s =~ /URI: 0/);
 
 ok($used_uri, 'used uri parameter');
 ok(!$bad_uri, 'valid uri parameter');
@@ -430,6 +522,11 @@ sub hook_add {
 
 		http_post('/set-txt',
 			body => "{\"host\":\"$name\",\"value\":\"$keyauth\"}");
+
+	} elsif ($challenge eq 'alpn') {
+		http_post('/add-tlsalpn01',
+			body => "{\"host\":\"$domain\",\"content\":\"$keyauth\"}");
+
 	} else {
 		die('Unknown challenge ' . $challenge);
 	}
@@ -445,6 +542,9 @@ sub hook_remove {
 		my $name = "_acme-challenge.$domain.";
 
 		http_post('/clear-txt', body => "{\"host\":\"$name\"}");
+
+	} elsif ($challenge eq 'alpn') {
+		http_post('/del-tlsalpn01', body => "{\"host\":\"$domain\"}");
 
 	} else {
 		die('Unknown challenge ' . $challenge);
@@ -505,6 +605,13 @@ sub hook_handler {
 
 		open my $f, '>>', $t->testdir() . '/uri.txt'
 			or die "Couldn't open uri.txt: $!";
+
+		# print $f "\tclient:    $h{client}\n";
+		# print $f "\thook:      $h{hook}\n";
+		# print $f "\tchallenge: $h{challenge}\n";
+		# print $f "\tdomain:    $h{domain}\n";
+		# print $f "\ttoken:     $h{token}\n";
+		# print $f "\tkeyauth:   $h{keyauth}\n";
 
 		print $f "URI: $uri_status\n";
 

@@ -8,8 +8,8 @@
 #define _ANGIE_H_INCLUDED_
 
 
-#define angie_version      1011000
-#define ANGIE_VERSION      "1.11.0"
+#define angie_version      1012000
+#define ANGIE_VERSION      "1.12.0"
 #define ANGIE_VER          "Angie/" ANGIE_VERSION
 
 #ifdef NGX_BUILD
@@ -22,6 +22,7 @@
 #define NGX_OLDPID_EXT     ".oldbin"
 
 #define ngx_angie_sign     ('A' + 'n' + 'g' + 'i' + 'e')
+#define NGX_ANGIE_SIGN     "Angie"
 
 
 extern ngx_time_t  ngx_build_time;

@@ -1040,6 +1040,16 @@ ngx_http_v3_init_pseudo_headers(ngx_http_request_t *r)
         }
 
         r->headers_in.server = host;
+
+        p = ngx_strlchr(r->host_start + host.len, r->host_end, ':');
+
+        if (p) {
+            rc = ngx_atoi(p + 1, r->host_end - p - 1);
+
+            if (rc > 0 && rc < 65536) {
+                r->port = rc;
+            }
+        }
     }
 
     if (ngx_list_init(&r->headers_in.headers, r->pool, 20,
@@ -1077,18 +1087,6 @@ ngx_http_v3_process_request_header(ngx_http_request_t *r)
 
     h3c = ngx_http_v3_get_session(c);
     h3scf = ngx_http_get_module_srv_conf(r, ngx_http_v3_module);
-
-#if (NGX_API)
-    {
-    ngx_http_core_srv_conf_t  *cscf;
-
-    cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
-
-    if (cscf->status_zone != NULL) {
-        ngx_http_calculate_request_statistic(r, cscf->status_zone);
-    }
-    }
-#endif
 
     if ((h3c->hq && !h3scf->enable_hq) || (!h3c->hq && !h3scf->enable)) {
         ngx_log_error(NGX_LOG_INFO, c->log, 0,

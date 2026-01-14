@@ -3805,7 +3805,7 @@ ngx_http_core_init_main_conf(ngx_conf_t *cf, void *conf)
             ngx_align(cmcf->server_names_hash_bucket_size, ngx_cacheline_size);
 
 
-    ngx_conf_init_uint_value(cmcf->variables_hash_max_size, 1024);
+    ngx_conf_init_uint_value(cmcf->variables_hash_max_size, 2048);
     ngx_conf_init_uint_value(cmcf->variables_hash_bucket_size, 64);
 
     cmcf->variables_hash_bucket_size =
@@ -4076,6 +4076,8 @@ ngx_http_core_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_hash_key_t   *type;
     ngx_hash_init_t   types_hash;
 
+    static ngx_str_t resolv_conf = ngx_string("conf");
+
     if (conf->root.data == NULL) {
 
         conf->alias = prev->alias;
@@ -4265,7 +4267,7 @@ ngx_http_core_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
              * to inherit it in all servers
              */
 
-            prev->resolver = ngx_resolver_create(cf, NULL, 0);
+            prev->resolver = ngx_resolver_create(cf, &resolv_conf, 1);
             if (prev->resolver == NULL) {
                 return NGX_CONF_ERROR;
             }

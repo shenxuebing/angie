@@ -68,6 +68,8 @@ static void ngx_http_ssl_handshake_handler(ngx_connection_t *c);
 #endif
 
 #if (NGX_API)
+static void ngx_http_calculate_request_statistic(ngx_http_request_t *r,
+    ngx_http_status_zone_t *status_zone);
 static void ngx_http_calculate_post_request_statistic(ngx_http_request_t *r);
 static ngx_int_t ngx_api_http_zones_iter(ngx_api_iter_ctx_t *ictx,
     ngx_api_ctx_t *actx);
@@ -1081,6 +1083,24 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
         }
 #endif
 
+#if (NGX_HTTP_ACME                                                              \
+     && defined TLSEXT_TYPE_application_layer_protocol_negotiation)
+        {
+        unsigned int          len;
+        const unsigned char  *data;
+
+        SSL_get0_alpn_selected(c->ssl->connection, &data, &len);
+
+        if (len == 10 && ngx_memcmp(data, "acme-tls/1", 10) == 0) {
+            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0,
+                           "http close acme alpn connection");
+
+            ngx_http_close_connection(c);
+            return;
+        }
+        }
+#endif
+
         c->log->action = "waiting for request";
 
         c->read->handler = ngx_http_wait_request_handler;
@@ -2076,8 +2096,9 @@ static ngx_int_t
 ngx_http_process_host(ngx_http_request_t *r, ngx_table_elt_t *h,
     ngx_uint_t offset)
 {
-    ngx_int_t  rc;
-    ngx_str_t  host;
+    u_char     *p;
+    ngx_int_t   rc;
+    ngx_str_t   host;
 
     if (r->headers_in.host) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
@@ -2117,6 +2138,17 @@ ngx_http_process_host(ngx_http_request_t *r, ngx_table_elt_t *h,
     }
 
     r->headers_in.server = host;
+
+    p = ngx_strlchr(h->value.data + host.len,
+                    h->value.data + h->value.len, ':');
+
+    if (p) {
+        rc = ngx_atoi(p + 1, h->value.data + h->value.len - p - 1);
+
+        if (rc > 0 && rc < 65536) {
+            r->port = rc;
+        }
+    }
 
     return NGX_OK;
 }
@@ -2215,24 +2247,14 @@ ngx_http_process_user_agent(ngx_http_request_t *r, ngx_table_elt_t *h,
 static ngx_int_t
 ngx_http_process_request_header(ngx_http_request_t *r)
 {
+    ngx_http_core_srv_conf_t  *cscf;
+
     if (r->headers_in.server.len == 0
         && ngx_http_set_virtual_server(r, &r->headers_in.server)
            == NGX_ERROR)
     {
         return NGX_ERROR;
     }
-
-#if (NGX_API)
-    {
-        ngx_http_core_srv_conf_t  *cscf;
-
-        cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
-
-        if (cscf->status_zone != NULL) {
-            ngx_http_calculate_request_statistic(r, cscf->status_zone);
-        }
-    }
-#endif
 
     if (r->headers_in.host == NULL && r->http_version > NGX_HTTP_VERSION_10) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
@@ -2295,7 +2317,11 @@ ngx_http_process_request_header(ngx_http_request_t *r)
         }
     }
 
-    if (r->method == NGX_HTTP_CONNECT) {
+    cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
+
+    if (r->method == NGX_HTTP_CONNECT
+        && (r->http_version != NGX_HTTP_VERSION_11 || !cscf->allow_connect))
+    {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "client sent CONNECT method");
         ngx_http_finalize_request(r, NGX_HTTP_NOT_ALLOWED);
@@ -2395,6 +2421,18 @@ ngx_http_process_request(ngx_http_request_t *r)
     r->stat_reading = 0;
     (void) ngx_atomic_fetch_add(ngx_stat_writing, 1);
     r->stat_writing = 1;
+#endif
+
+#if (NGX_API)
+    {
+        ngx_http_core_srv_conf_t  *cscf;
+
+        cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
+
+        if (cscf->status_zone != NULL) {
+            ngx_http_calculate_request_statistic(r, cscf->status_zone);
+        }
+    }
 #endif
 
     c->read->handler = ngx_http_request_handler;
@@ -2817,6 +2855,18 @@ ngx_http_finalize_request(ngx_http_request_t *r, ngx_int_t rc)
         }
 
         if (r == r->main) {
+#if (NGX_API)
+            if (r->stat_reading) {
+                ngx_http_core_srv_conf_t  *cscf;
+
+                cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
+
+                if (cscf->status_zone != NULL) {
+                    ngx_http_calculate_request_statistic(r, cscf->status_zone);
+                }
+            }
+#endif
+
             if (c->read->timer_set) {
                 ngx_del_timer(c->read);
             }
@@ -4261,7 +4311,7 @@ ngx_http_log_error_handler(ngx_http_request_t *r, ngx_http_request_t *sr,
 
 #if (NGX_API)
 
-void
+static void
 ngx_http_calculate_request_statistic(ngx_http_request_t *r,
     ngx_http_status_zone_t *status_zone)
 {
@@ -4425,6 +4475,8 @@ ngx_api_status_zone_iterate(ngx_api_ctx_t *actx, ngx_http_stats_zone_t *zones,
 
     rc = NGX_DECLINED;
 
+    ngx_memzero(&ictx, sizeof(ngx_api_iter_ctx_t));
+
     ictx.entry.handler = ngx_api_object_handler;
     ictx.entry.data.ents = entries;
 
@@ -4530,6 +4582,8 @@ ngx_api_http_response_codes_handler(ngx_api_entry_data_t data,
     ngx_api_iter_ctx_t   ictx;
 
     codes = (u_char *) stats_zone->stats.any + data.off;
+
+    ngx_memzero(&ictx, sizeof(ngx_api_iter_ctx_t));
 
     ictx.entry.handler = ngx_api_number_handler;
     ictx.ctx = (void *) 0;
