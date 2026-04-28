@@ -10,6 +10,7 @@ use warnings;
 use strict;
 
 use File::Basename;
+use IO::Socket::INET;
 use Test::More;
 
 sub new {
@@ -17,7 +18,6 @@ sub new {
 	my $params = shift // {};
 
 	my $container_engine = $params->{container_engine} // 'docker';
-
 	die 'Incorrect container engine'
 		unless $container_engine =~ /^(?:docker|podman)$/;
 
@@ -25,59 +25,131 @@ sub new {
 		die "no $container_engine";
 	}
 
-	my $self = bless {
-		network  => 'angie_test_net_' . basename($0, qw(.t)),
-		registry => $ENV{TEST_ANGIE_DOCKER_REGISTRY} // 'docker.io',
-	}, $class;
-
-	$self->_init_endpoint($container_engine)
-		or return;
-
-	$self->{container_engine} = $container_engine;
-
-	$self->_test_network()
-		or return;
-
-	return $self;
-}
-
-sub _init_endpoint {
-	my ($self, $container_engine) = @_;
-
-	my $error = `$container_engine version 2>&1 1>/dev/null`;
+	my $error = `$container_engine -v 2>&1 1>/dev/null`;
 	my $exit_code = $?;
 	unless (($exit_code >> 8) == 0) {
 		die "incorrect $container_engine setup: $error";
 	}
 
-	if ($container_engine eq 'docker') {
-		$self->{endpoint} = '/var/run/docker.sock';
+	my $networks = $params->{networks}
+		// ['angie_test_net_' . basename($0, qw(.t))];
 
-		unless (-e $self->{endpoint}) {
-			die 'incorrect endpoint setup: ' . $self->{endpoint}
-				. ' is missing';
-		}
+	my $self = bless {
+		_initialized     => 0,
+		container_engine => $container_engine,
+		networks         => $networks,
+		registry         => $ENV{TEST_ANGIE_DOCKER_REGISTRY} // 'docker.io',
+	}, $class;
 
-	} else {
-		# this is the preferrable endpoint
-		$self->{endpoint} = '/tmp/podman.sock';
+	$self->_init_endpoint($params);
+	$self->_test_endpoint();
 
-		if (-e $self->{endpoint}) {
-			# all is good, do nothing
+	# enable cleanup in DESTROY before _test_network
+	$self->{_initialized} = 1;
 
-		} elsif (defined $ENV{XDG_RUNTIME_DIR}
-			&& -e $ENV{XDG_RUNTIME_DIR} . '/podman/podman.sock') {
+	$self->_test_network();
 
-			# this is the default endpoint on most systems
-			$self->{endpoint} = $ENV{XDG_RUNTIME_DIR} . '/podman/podman.sock';
+	# basic container check
+	note("basic $container_engine container check ...");
+	$self->start_containers(1, '');
+	$self->stop_containers();
+	note("basic $container_engine container check: passed");
+
+	return $self;
+}
+
+sub _init_endpoint {
+	my ($self, $params) = @_;
+
+	if (defined $params->{endpoint}) {
+		$self->{endpoint} = $params->{endpoint};
+		return 1;
+	}
+
+	if ($self->{container_engine} eq 'docker') {
+		$self->{endpoint} = 'unix:/var/run/docker.sock';
+		return 1;
+	}
+
+	my @socket_locations = (
+		'/tmp/podman.sock', # this is the preferrable endpoint for podman
+		'/run/podman/podman.sock' # rootful podman socket location
+	);
+	# this is the default endpoint on most systems
+	push @socket_locations, $ENV{XDG_RUNTIME_DIR} . '/podman/podman.sock'
+		if defined $ENV{XDG_RUNTIME_DIR};
+
+	foreach my $socket (@socket_locations) {
+		note("checking podman socket $socket...");
+
+		if (-e $socket) {
+			if (-w $socket) {
+				$self->{endpoint} = "unix:$socket";
+				note("socket $socket: exists and writable");
+				last;
+			} else {
+				note("socket $socket: exists but not writable, skipping");
+			}
 		} else {
-			die 'incorrect podman setup: none of the known endpoints exists';
+			note("socket $socket: not found");
 		}
 	}
 
-	unless (-w $self->{endpoint}) {
-		die 'incorrect endpoint setup: ' . $self->{endpoint}
-			. ' is not writable';
+	die 'incorrect podman setup: none of the known endpoints exists'
+		unless defined $self->{endpoint};
+
+	return 1;
+}
+
+sub _test_endpoint {
+	my ($self) = @_;
+
+	my $container_engine = $self->{container_engine};
+
+	if ($self->{endpoint} =~ /^unix:(.+)$/) {
+		my $socket = $1;
+		unless (-e $socket) {
+			die "incorrect $container_engine setup: $socket is missing";
+		}
+		unless (-w $socket) {
+			die "incorrect $container_engine setup: $socket"
+				. ' is not writable';
+		}
+	} elsif ($self->{endpoint} =~ /^http:\/\/(.+)$/) {
+		my $host = $1;
+
+		# try to connect to socket
+		my $s = IO::Socket::INET->new(
+			Proto    => 'tcp',
+			PeerAddr => $host,
+			Timeout  => 5,
+		)
+			or die "http endpoint for $container_engine API is not configured";
+
+		my $request = <<"EOF";
+GET /version HTTP/1.0
+Host: $host
+
+EOF
+
+		my $res = $s->send($request);
+		die "send failed: $!\n"
+			unless defined $res;
+
+		my $buffer;
+		$res = $s->recv($buffer, 1024);
+		die "recv failed: $!\n"
+			unless defined $res;
+
+		$s->close();
+
+		die "http endpoint for $container_engine API is not configured"
+			unless $buffer && $buffer =~ /$container_engine/i;
+
+	} elsif ($self->{endpoint} =~ /^https:/) {
+		die 'https endpoints are not yet working';
+	} else {
+		die 'incorrect endpoint';
 	}
 
 	return 1;
@@ -87,19 +159,20 @@ sub _test_network {
 	my ($self) = @_;
 
 	my $container_engine = $self->{container_engine};
-	my $network = $self->{network};
 
-	my $cmd = "$container_engine network create $network";
-	note("create $container_engine network:\n$cmd");
+	foreach my $network (@{ $self->{networks} }) {
+		my $cmd = "$container_engine network create $network";
+		note("create $container_engine network:\n$cmd");
 
-	system($cmd . ' 1>/dev/null') == 0
-		or die "can't create $container_engine network";
+		system($cmd . ' 1>/dev/null') == 0
+			or die "can't create $container_engine network";
 
-	$cmd = "$container_engine network inspect $network";
-	note("inspect $container_engine network:\n$cmd");
+		$cmd = "$container_engine network inspect $network";
+		note("inspect $container_engine network:\n$cmd");
 
-	system($cmd . ' 1>/dev/null') == 0
-		or die "can't inspect $container_engine network";
+		system($cmd . ' 1>/dev/null') == 0
+			or die "can't inspect $container_engine network";
+	}
 
 	return 1;
 }
@@ -108,18 +181,36 @@ sub start_containers {
 	my ($self, $count, $labels) = @_;
 
 	my $container_engine = $self->{container_engine};
-	my $network = $self->{network};
 	my $registry = $self->{registry};
-
-	$labels = "-l 'angie.network=$network' " . $labels;
+	my @networks = @{ $self->{networks} };
+	my $id = join('-', @networks);
 
 	for my $idx (1 .. $count) {
-		my $cmd = "$container_engine run -d $labels --name whoami-$idx"
-			. " --network $network $registry/traefik/whoami";
-		note("start $container_engine container $idx of $count");
+		my $container = "whoami-$id-$idx";
+
+		# With Podman, containers need to be in bridge mode in order to be
+		# subsequently connected to various networks.
+		my $cmd = "$container_engine create $labels --name $container"
+			. " --network bridge $registry/traefik/whoami";
+		note("create $container_engine container $container ($idx of $count)");
 
 		system($cmd . ' 1>/dev/null') == 0
-			or die "cannot start $container_engine containers";
+			or die "cannot create $container_engine container $container";
+
+		foreach my $network (@networks) {
+			$cmd = "$container_engine network connect $network $container";
+			note("connect $container_engine container $container to $network");
+
+			system($cmd . ' 1>/dev/null') == 0
+				or die "cannot connect $container_engine container $container"
+					. " to $network";
+		}
+
+		$cmd = "$container_engine start $container";
+		note("start $container_engine container $container");
+
+		system($cmd . ' 1>/dev/null') == 0
+			or die "cannot start $container_engine container $container";
 	}
 }
 
@@ -127,80 +218,99 @@ sub stop_containers {
 	my ($self) = @_;
 
 	my $container_engine = $self->{container_engine};
-	my $network = $self->{network};
 
-	my $list_containers_cmd = $container_engine
-		. " ps -a -q --filter 'network=$network'";
+	foreach my $network (@{ $self->{networks} }) {
+		my $list_containers_cmd = $container_engine
+			. " ps -a -q --filter 'network=$network'";
 
-	if (`$list_containers_cmd` eq '') {
-		return;
-	}
+		if (`$list_containers_cmd` eq '') {
+			return;
+		}
 
-	my $cmd = "$container_engine stop \$($list_containers_cmd)";
-	note("stop $container_engine containers:\n$cmd");
+		my $cmd = "$container_engine stop \$($list_containers_cmd)";
+		note("stop $container_engine containers:\n$cmd");
 
-	if (system($cmd . ' 1>/dev/null') != 0) {
-		$cmd = "$container_engine kill \$($list_containers_cmd)";
-		note("force stop $container_engine containers:\n$cmd");
+		if (system($cmd . ' 1>/dev/null') != 0) {
+			note("cannot stop containers, will try to force stop them");
+			$cmd = "$container_engine kill \$($list_containers_cmd)";
+			note("force stop $container_engine containers:\n$cmd");
+
+			system($cmd . ' 1>/dev/null') == 0
+				or diag("cannot stop $container_engine containers,"
+					. 'will try to remove them');
+		}
+
+		$cmd = "$container_engine rm -f \$($list_containers_cmd)";
+		note("remove $container_engine containers:\n$cmd");
 
 		system($cmd . ' 1>/dev/null') == 0
-			or die "cannot stop $container_engine containers";
+			or die "cannot remove $container_engine containers";
 	}
-
-	$cmd = "$container_engine rm -f \$($list_containers_cmd)";
-	note("remove $container_engine containers:\n$cmd");
-
-	system($cmd . ' 1>/dev/null') == 0
-		or die "cannot remove $container_engine containers";
 }
 
 sub pause_containers {
 	my ($self, $cmd) = @_;
 
 	my $container_engine = $self->{container_engine};
-	my $network = $self->{network};
 
-	my $pause_cmd = "$container_engine $cmd "
-		. "\$($container_engine ps -a -q --filter 'network=$network')";
-	note("$container_engine $cmd:\n$pause_cmd");
+	foreach my $network (@{ $self->{networks} }) {
+		my $pause_cmd = "$container_engine $cmd "
+			. "\$($container_engine ps -a -q --filter 'network=$network')";
+		note("$container_engine $cmd:\n$pause_cmd");
 
-	my $pause_cmd_res = system($pause_cmd . ' 1>/dev/null');
+		my $pause_cmd_res = system($pause_cmd . ' 1>/dev/null');
 
-	note(`$container_engine ps -a`);
+		note(`$container_engine ps -a`);
 
-	die "cannot $cmd $container_engine containers"
-		unless $pause_cmd_res == 0;
+		die "cannot $cmd $container_engine containers"
+			unless $pause_cmd_res == 0;
+	}
 }
 
-sub get_container_ips {
-	my $self = shift;
+sub get_container_ips_per_network {
+	my ($self, $network) = @_;
 
 	my $container_engine = $self->{container_engine};
-	my $network = $self->{network};
 
 	my $cmd = "$container_engine inspect "
 		. "\$($container_engine ps -a -q --filter 'network=$network') "
 		. "--format '{{.NetworkSettings.Networks.$network.IPAddress}}'";
 	note("get $container_engine container ips:\n$cmd");
 
-	my $data = `$cmd`;
+	my @ips = split("\n", `$cmd`);
 
-	return split("\n", $data);
+	return @ips;
+}
+
+sub get_container_networks {
+	my $self = shift;
+
+	my %networks;
+
+	foreach my $network (@{ $self->{networks} }) {
+		my @ips = get_container_ips_per_network($self, $network);
+
+		$networks{$network} = \@ips;
+	}
+
+	return %networks;
 }
 
 sub DESTROY {
 	my ($self) = @_;
 
-	my $container_engine = $self->{container_engine};
-
-	return unless defined $container_engine;
+	return unless $self->{_initialized};
 
 	$self->stop_containers();
 
-	my $cmd = "$container_engine network rm $self->{network}";
-	note("remove $container_engine network:\n$cmd");
+	my $container_engine = $self->{container_engine};
+	foreach my $network (@{ $self->{networks} }) {
+		my $cmd = "$container_engine network rm $network";
+		note("remove $container_engine network:\n$cmd");
 
-	`$cmd 1>/dev/null`;
+		system("$cmd 1>/dev/null") == 0
+			or diag("cannot remove $container_engine network $network!");
+	}
 }
 
 1;

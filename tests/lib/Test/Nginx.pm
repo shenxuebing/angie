@@ -38,7 +38,7 @@ use Test::More qw//;
 use Test::Nginx::Config;
 use Test::API qw/ api_status traverse_api_status /;
 use Test::Control qw/ wait_for_reload stop_pid worker_generations /;
-use Test::Utils qw/ trim /;
+use Test::Utils qw/ trim get_caller /;
 
 ###############################################################################
 
@@ -64,7 +64,6 @@ sub new {
 		TMPDIR => 1
 	)
 		or die "Can't create temp directory: $!\n";
-	$self->{_testdir} =~ s!\\!/!g if $^O eq 'MSWin32';
 
 	Test::More::BAIL_OUT("no $NGINX binary found")
 		unless -x $NGINX;
@@ -307,16 +306,17 @@ sub has_module($) {
 sub has_feature($) {
 	my ($self, $feature) = @_;
 
+	# compatibility with tests merged from nginx and freenginx
 	if ($feature eq 'symlink') {
-		return $^O ne 'MSWin32';
+		return 1;
 	}
 
 	if ($feature eq 'unix') {
-		return $^O ne 'MSWin32';
+		return 1;
 	}
 
 	if ($feature eq 'udp') {
-		return $^O ne 'MSWin32';
+		return 1;
 	}
 
 	if ($feature =~ /^socket_ssl/) {
@@ -398,18 +398,6 @@ sub has_version($) {
 
 sub has_daemon($) {
 	my ($self, $daemon) = @_;
-
-	if ($^O eq 'MSWin32') {
-		`for %i in ($daemon.exe) do \@echo | set /p x=%~\$PATH:i`
-			or Test::More::plan(skip_all => "$daemon not found");
-		return $self;
-	}
-
-	if ($^O eq 'solaris') {
-		Test::More::plan(skip_all => "$daemon not found")
-			unless `command -v $daemon`;
-		return $self;
-	}
 
 	Test::More::plan(skip_all => "$daemon not found")
 		unless `which $daemon 2>/dev/null`;
@@ -539,12 +527,6 @@ sub run(;$) {
 		die "Can't start nginx";
 	}
 
-	for (1 .. 50) {
-		last if $^O ne 'MSWin32';
-		last if $self->read_file('error.log') =~ /create thread/;
-		select undef, undef, undef, 0.1;
-	}
-
 	$self->{_started} = 1;
 	return $self;
 }
@@ -560,7 +542,7 @@ sub port {
 			Proto => 'tcp',
 			LocalAddr => '127.0.0.1:' . shift,
 			Listen => 1,
-			Reuse => ($^O ne 'MSWin32'),
+			Reuse => 1,
 		);
 	};
 
@@ -637,18 +619,20 @@ sub waitforfile($;$) {
 	my ($self, $file, $pid) = @_;
 	my $exited;
 
+	my $sec = 20;
+
 	# wait for file to appear
 	# or specified process to exit
 
-	for (1 .. 200) {
+	for (1 .. ($sec * 10)) {
 		return 1 if -e $file;
 		return 0 if $exited;
 		$exited = waitpid($pid, WNOHANG) != 0 if $pid;
 		select undef, undef, undef, 0.1;
 	}
 
-	my $tname = (caller(1))[1];
-	Test::More::diag("$tname:\t$file was not created after 20 seconds");
+	my $c = get_caller();
+	Test::More::diag("$file was not created after $sec seconds ($c)");
 
 	return undef;
 }
@@ -656,9 +640,11 @@ sub waitforfile($;$) {
 sub waitforsocket($) {
 	my ($self, $peer) = @_;
 
+	my $sec = 5;
+
 	# wait for socket to accept connections
 
-	for (1 .. 50) {
+	for (1 .. ($sec * 10)) {
 		my $s = IO::Socket::INET->new(
 			Proto => 'tcp',
 			PeerAddr => $peer,
@@ -669,15 +655,20 @@ sub waitforsocket($) {
 		select undef, undef, undef, 0.1;
 	}
 
+	my $c = get_caller();
+	Test::More::diag("socket was not created after $sec seconds ($c)");
+
 	return undef;
 }
 
 sub waitforsslsocket($) {
 	my ($self, $peer) = @_;
 
+	my $sec = 5;
+
 	# wait for socket to accept connections
 
-	for (1 .. 50) {
+	for (1 .. ($sec * 10)) {
 		my $s = IO::Socket::SSL->new(
 			Proto => 'tcp',
 			PeerAddr => $peer,
@@ -688,6 +679,9 @@ sub waitforsslsocket($) {
 
 		select undef, undef, undef, 0.1;
 	}
+
+	my $c = get_caller();
+	Test::More::diag("SSL socket was not created after $sec seconds ($c)");
 
 	return undef;
 }
@@ -765,7 +759,7 @@ sub stop_resolver {
 
 	stop_pid($pid, 1);
 
-	my $is_running = `ps -h $pid | grep -v defunct | wc -l`;
+	my $is_running = `ps $pid | tail +2 | grep -v defunct | wc -l`;
 	$is_running =~ s/^\s+|\s+$//g;
 
 	if ($is_running) {
@@ -824,18 +818,7 @@ sub reload {
 		die "Something is wrong: too many generations of workers";
 	}
 
-	if ($^O eq 'MSWin32') {
-		my $testdir = $self->{_testdir};
-		my @globals = $self->{_test_globals} ?
-			() : ('-g', "pid $testdir/nginx.pid; "
-			. "error_log $testdir/error.log debug;");
-		system($NGINX, '-p', $testdir, '-c', "nginx.conf",
-			'-s', 'reload', '-e', 'error.log', @globals) == 0
-			or die "system() failed: $?\n";
-
-	} else {
-		kill 'HUP', $pid;
-	}
+	kill 'HUP', $pid;
 
 	# wait until all old workers will start to shut down
 	my $reloaded = wait_for_reload($pid, $generation + 1);
@@ -864,7 +847,7 @@ sub stop_daemons() {
 
 	while ($self->{_daemons} && scalar @{$self->{_daemons}}) {
 		my $p = shift @{$self->{_daemons}};
-		kill $^O eq 'MSWin32' ? 9 : 'TERM', $p;
+		kill 'TERM', $p;
 
 		my $exited;
 
@@ -875,7 +858,7 @@ sub stop_daemons() {
 		}
 
 		if (!$exited) {
-			kill $^O eq 'MSWin32' ? 9 : 'TERM', $p;
+			kill 'TERM', $p;
 			waitpid($p, 0);
 		}
 	}
@@ -1082,7 +1065,6 @@ sub test_globals_modules() {
 	}
 
 	$modules = File::Spec->rel2abs($modules);
-	$modules =~ s!\\!/!g if $^O eq 'MSWin32';
 
 	my $s = '';
 
@@ -1119,7 +1101,6 @@ sub test_globals_perl5lib() {
 	my $objs = File::Spec->catpath($volume, $dir, '');
 
 	$objs = File::Spec->rel2abs($objs);
-	$objs =~ s!\\!/!g if $^O eq 'MSWin32';
 
 	return "env PERL5LIB=$objs/src/http/modules/perl:"
 		. "$objs/src/http/modules/perl/blib/arch;\n";

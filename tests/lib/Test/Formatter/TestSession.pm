@@ -27,6 +27,7 @@ BEGIN {
 		xresults        => sub { shift; shift; },
 		tc_errors       => sub { shift; shift; },
 		tc_misc         => sub { shift; shift; },
+		tc_end_time     => sub { shift; shift; },
 		meta            => sub { shift; shift; },
 		closed          => sub { shift; shift; },
 		tmp_fh          => sub { shift; shift; },
@@ -35,6 +36,8 @@ BEGIN {
 		err_lines       => sub { shift; shift; },
 		curr_tc_num     => sub { shift; shift; },
 		console_session => sub { shift; shift; },
+		verbosity       => sub { shift; shift; },
+		started_at      => sub { shift; shift; },
 		start_wall      => sub { shift; shift; },
 		start_user      => sub { shift; shift; },
 		start_cuser     => sub { shift; shift; },
@@ -53,13 +56,16 @@ sub _initialize {
 
 	$self->results([]);
 	$self->xresults([]);
+	$self->err_lines([]);
 	$self->tc_errors({});
 	$self->tc_misc({});
+	$self->tc_end_time([]);
+	$self->started_at(0);
 	$self->meta({});
 	$self->closed(0);
 	$self->curr_tc_num(0);
 
-	foreach my $arg (qw(test parser formatter console_session)) {
+	foreach my $arg (qw(test parser formatter console_session verbosity)) {
 		$self->$arg($args->{$arg}) if defined $args->{$arg};
 	}
 
@@ -82,13 +88,21 @@ sub result {
 	my ($self, $result) = @_;
 
 	# dump and grab up-to-date stderr
-	$self->restore_stderr($result);
-	# start the next test if any
-	$self->grab_stderr();
+	my $stderr_lines = $self->restore_stderr($result);
 
 	$self->console_session->result($result);
 
+	# dump captured stderr for this test file
+	for my $line (@$stderr_lines) {
+		print STDERR "$line\n";
+	}
+
+	# start the next test if any
+	$self->grab_stderr();
+
 	if ($result->is_test) {
+
+		push @{$self->tc_end_time}, time();
 
 		$result->{test_status}  = $result->has_todo ? 'todo-' : '';
 		$result->{test_status} .= $result->has_skip ? 'skip-' : '';
@@ -124,6 +138,7 @@ sub close_test {
 	my ($user, $system, $cuser, $csystem) = times;
 
 
+	$self->{started_at} = $self->start_wall;
 	$self->{time_wall} = $wall - $self->start_wall;
 	$self->{time_user} = ($user - $self->start_user);
 	$self->{time_user_child} = ($cuser - $self->start_cuser);
@@ -133,9 +148,15 @@ sub close_test {
 	$self->{time_system_total} = $self->{time_system} + $self->{time_system_child};
 	$self->{time_process} = $self->{time_system_total} + $self->{time_user_total};
 
-	$self->restore_stderr();
+	my $stderr_lines = $self->restore_stderr();
 
+	# final results
 	$self->console_session->close_test(@args);
+
+	# final stderr
+	for my $line (@$stderr_lines) {
+		print STDERR "$line\n";
+	}
 
 	$self->closed(1);
 }
@@ -151,6 +172,7 @@ sub session_report {
 		xresults => $self->xresults,
 		tc_errors => $self->tc_errors,
 		tc_misc => $self->tc_misc,
+		tc_end_time => $self->tc_end_time,
 		err_lines => $self->err_lines,
 	};
 
@@ -169,6 +191,7 @@ sub session_report {
 	$r->{test_status} = $r->{has_problems} ? 'failed' : 'passed';
 	$r->{elapsed_time} = $r->{end_time} - $r->{start_time};
 
+	$r->{started_at} = $self->{started_at};
 	$r->{time_wall} = $self->{time_wall};
 	$r->{time_user} = $self->{time_user};
 	$r->{time_user_child} = $self->{time_user_child};
@@ -185,10 +208,11 @@ sub session_report {
 sub grab_stderr {
 	my ($self) = @_;
 
-	# TODO: pass $t->testdir() here and use per-test directory
-
 	# capture stderr since now into this file
 	my ($fh, $fn) = tempfile('angie-test-stderr-XXXXXXXX', TMPDIR => 1);
+
+	$fh->autoflush(1);
+
 	$self->tmp_fh($fh);
 	$self->tmp_fn($fn);
 
@@ -203,6 +227,11 @@ sub grab_stderr {
 sub restore_stderr {
 	my ($self, $result) = @_;
 
+	STDERR->flush();
+
+	# restore stderr
+	open STDERR, '>&', $self->orig_stderr or die "Cannot restore STDERR: $!";
+
 	# save stderr of this test
 	close($self->tmp_fh);
 
@@ -216,26 +245,20 @@ sub restore_stderr {
 			# do not push empty out (most of it)
 			# object index is testcase number
 			if ($result->is_test) {
-				$self->tc_errors->{$self->curr_tc_num} = $lines;
+				push @{$self->tc_errors->{$self->curr_tc_num}}, @$lines;
 			} else {
-				$self->tc_misc->{$self->curr_tc_num} = $lines;
+				push @{$self->tc_misc->{$self->curr_tc_num}}, @$lines;
 			}
 		}
 
 	} else {
 		# global, per-test-file stderr, if any
-		$self->err_lines($lines);
+		push @{$self->err_lines}, @$lines;
 	}
 
 	unlink $self->tmp_fn or warn "Cannot remove temporary file: $!";
 
-	# restore stderr
-	open STDERR, '>&', $self->orig_stderr or die "Cannot restore STDERR: $!";
-
-	# dump captured stderr for this test file
-	for my $line (@$lines) {
-		print STDERR "$line\n";
-	}
+	return $lines;
 }
 
 

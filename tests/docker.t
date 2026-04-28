@@ -33,7 +33,10 @@ unless (caller) {
 		->has(qw/stream stream_upstream_zone stream_upstream_sticky/);
 
 	my $docker_helper = eval {
-		Test::Docker->new({container_engine => 'docker'});
+		Test::Docker->new({
+			container_engine => 'docker',
+			networks => ['angie_test_network']
+		 });
 	};
 	if ($@) {
 		plan(skip_all => $@);
@@ -66,7 +69,7 @@ events {
 http {
     %%TEST_GLOBALS_HTTP%%
 
-    docker_endpoint unix:$docker_helper->{endpoint};
+    docker_endpoint $docker_helper->{endpoint};
 
     upstream u1 {
         zone http_z 1m;
@@ -130,6 +133,16 @@ sub prepare_test_cases {
 
 	my $container_engine = $docker_helper->{container_engine};
 
+	eval {
+		$docker_helper->start_containers(1, '');
+		$docker_helper->pause_containers('pause');
+		$docker_helper->pause_containers('unpause');
+		$docker_helper->stop_containers();
+	};
+	if ($@) {
+		plan(skip_all => "$container_engine pause is not supported: $@");
+	}
+
 	return (
 		"3 $container_engine containers" => {
 			test_sub    => \&test_containers,
@@ -168,7 +181,8 @@ sub test_containers {
 
 	$docker_helper->start_containers($test_params->{count}, prepare_labels());
 
-	my @ips = $docker_helper->get_container_ips();
+	my @ips = $docker_helper->get_container_ips_per_network(
+		'angie_test_network');
 
 	my %expected_peers = (
 		http => {
@@ -257,7 +271,8 @@ sub prepare_labels {
 		. ' -l "angie.stream.upstreams.u2.slow_start=3s"'
 		. ' -l "angie.stream.upstreams.u2.fail_timeout=3s"'
 		. ' -l "angie.stream.upstreams.u2.backup=true"'
-		. ' -l "angie.stream.upstreams.u2.sid=sid4"';
+		. ' -l "angie.stream.upstreams.u2.sid=sid4"'
+		. ' -l "angie.network=angie_test_network"';
 
 	return $labels;
 }

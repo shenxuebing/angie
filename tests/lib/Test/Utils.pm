@@ -13,7 +13,8 @@ use Exporter qw/import/;
 BEGIN {
 	our @EXPORT_OK = qw/ get_json put_json delete_json patch_json annotate
 		getconn hash_like stream_daemon trim log2i log2o log2c
-		$TIME_RE $NUM_RE $POSITIVE_NUM is_positive_num /;
+		$TIME_RE $NUM_RE $POSITIVE_NUM is_positive_num get_caller wait_for
+		get_primary_user_group /;
 
 	our %EXPORT_TAGS = (
 		json => [ qw/ get_json put_json delete_json patch_json / ],
@@ -302,6 +303,64 @@ sub trim {
 	my $string = shift;
 	$string =~ s/^\s+|\s+$//g;
 	return $string;
+}
+
+sub get_caller {
+	my @stack;
+	my $i = 0;
+
+	while (my @frame = caller($i++)) {
+		# package (unused), filename, line number
+		my (undef, $fname, $line) = @frame;
+
+		my ($base) = $fname =~ /([^\/]+)$/;
+
+		push @stack, "$base:$line";
+	}
+
+	return @stack ? join(" > ", reverse @stack) : 'unknown';
+}
+
+sub wait_for {
+	my ($condition, $info, $delay) = @_;
+
+	my $sec = $delay // 20;
+	my $ms = 0;
+
+	for (1 .. ($sec * 10)) {
+		if ($condition->()) {
+			note("Condition '$info' met in $ms ms\n");
+			return 1;
+		}
+
+		$ms += 0.1;
+		select undef, undef, undef, 0.1;
+	}
+
+	my $c = get_caller();
+	diag("Timeout waiting for '$info' after $sec seconds ($c)");
+
+	return;
+}
+
+sub get_primary_user_group {
+	my $username = shift // 'root';
+
+	my $gid = (getpwnam($username))[3];
+
+	unless (defined $gid) {
+		diag("User $username not found");
+		return;
+	}
+
+	my $group_name = getgrgid($gid);
+
+	unless (defined $group_name) {
+		diag("Group with GID $gid (primary group of $username) not found");
+		return $group_name;
+	}
+
+	return $group_name;
 }
 
 1;

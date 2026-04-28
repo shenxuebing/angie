@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 
+# (C) 2026 Web Server LLC
 # (C) Sergey Kandaurov
 # (C) Nginx, Inc.
 
@@ -43,6 +44,7 @@ http {
         listen       127.0.0.1:8080;
         server_name  on;
 
+        http2 on;
         absolute_redirect on;
         error_page 400 /return301;
 
@@ -78,6 +80,8 @@ http {
     server {
         listen       127.0.0.1:8080;
         server_name  off;
+
+        http2 on;
 
         location / { }
 
@@ -170,14 +174,9 @@ like(get('off', '/return301'), qr!Location: /redirect\x0d?$!m, 'off return');
 # %00-%1F, %7F-%FF, " ", """, "<", ">", "\", "^", "`", "{", "|", "}"
 # additionally, all characters in ESCAPE_URI: "?", "%", "#"
 
-SKIP: {
-skip 'win32', 1 if $^O eq 'MSWin32';
-
 like(get('off', '/auto%20%22%23%25%3C%3E%3F%5C%5E%60%7B%7C%7D'),
 	qr!Location: /auto%20%22%23%25%3C%3E%3F%5C%5E%60%7B%7C%7D/\x0d?$!m,
 	'auto escaped strict');
-
-}
 
 ###############################################################################
 

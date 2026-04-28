@@ -71,6 +71,11 @@
 #endif
 
 
+#if (OPENSSL_VERSION_NUMBER < 0x1010000fL)
+#define ASN1_STRING_get0_data(x)     (x)->data
+#endif
+
+
 #if (OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined SSL_get_peer_certificate)
 #define SSL_get_peer_certificate(s)  SSL_get1_peer_certificate(s)
 #endif
@@ -109,6 +114,13 @@ typedef struct {
     ngx_atomic_t                failed;
 } ngx_ssl_stats_t;
 
+
+typedef struct {
+    ngx_str_t                   filename;
+    STACK_OF(X509)             *chain;
+    EVP_PKEY                   *pkey;
+} ngx_ssl_api_cert_t;
+
 #endif
 
 struct ngx_ssl_s {
@@ -120,6 +132,8 @@ struct ngx_ssl_s {
 
     ngx_rbtree_t                staple_rbtree;
     ngx_rbtree_node_t           staple_sentinel;
+
+    ngx_open_file_t            *keylog_file;
 };
 
 
@@ -284,6 +298,13 @@ void *ngx_ssl_cache_fetch(ngx_conf_t *cf, ngx_uint_t index, char **err,
     ngx_str_t *path, void *data);
 void *ngx_ssl_cache_connection_fetch(ngx_ssl_cache_t *cache, ngx_pool_t *pool,
     ngx_uint_t index, char **err, ngx_str_t *path, void *data);
+#if (NGX_API)
+void *ngx_ssl_cache_static_peek(ngx_pool_t *pool, ngx_uint_t index,
+    ngx_str_t *path);
+#if (NGX_STREAM_SSL)
+ngx_int_t ngx_api_stream_add_certs(ngx_api_ctx_t *actx, void *ctx);
+#endif
+#endif
 
 ngx_array_t *ngx_ssl_read_password_file(ngx_conf_t *cf, ngx_str_t *file);
 ngx_array_t *ngx_ssl_preserve_passwords(ngx_conf_t *cf,
@@ -306,7 +327,7 @@ ngx_int_t ngx_ssl_session_ticket_keys(ngx_conf_t *cf, ngx_ssl_t *ssl,
     ngx_array_t *paths);
 ngx_int_t ngx_ssl_session_cache_init(ngx_shm_zone_t *shm_zone, void *data);
 
-ngx_int_t ngx_ssl_set_client_hello_callback(SSL_CTX *ssl_ctx,
+ngx_int_t ngx_ssl_set_client_hello_callback(ngx_ssl_t *ssl,
     ngx_ssl_client_hello_arg *cb);
 #ifdef SSL_CLIENT_HELLO_SUCCESS
 int ngx_ssl_client_hello_callback(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg);
@@ -410,6 +431,7 @@ void ngx_ssl_connection_error(ngx_connection_t *c, int sslerr, ngx_err_t err,
 void ngx_cdecl ngx_ssl_error(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
     char *fmt, ...);
 void ngx_ssl_cleanup_ctx(void *data);
+void ngx_ssl_keylogger(const ngx_ssl_conn_t *ssl, const char *line);
 
 #if (NGX_HTTP_PROXY_MULTICERT || NGX_STREAM_PROXY_MULTICERT)
 char *ngx_ssl_certificate_slot(ngx_conf_t *cf, ngx_command_t *cmd,

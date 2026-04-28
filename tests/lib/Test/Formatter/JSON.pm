@@ -12,12 +12,14 @@ package Test::Formatter::JSON;
 use strict;
 use warnings;
 
+use Cwd;
 use IO::File;
 use File::Temp qw(tempdir);
 use File::Spec::Functions qw(catdir);
 use Test::Formatter::TestSession;
+use TAP::Formatter::Console;
 use TAP::Formatter::File;
-use POSIX 'strftime';
+use POSIX qw/ strftime strerror :sys_wait_h /;
 use JSON;
 
 use base qw(TAP::Base);
@@ -48,25 +50,35 @@ sub _initialize {
 	$self->session_class('Test::Formatter::TestSession');
 	$self->sessions([]);
 
-	my $report_fn = strftime 'testreport-%Y%m%d_%H%M%S.json', localtime;
+	my $prefix = "";
+
+	if (defined $ENV{REPORT_PREFIX} && $ENV{REPORT_PREFIX} ne '') {
+		$prefix = '-' . $ENV{REPORT_PREFIX};
+	}
+
+	my $report_fn = strftime "testreport$prefix-%Y%m%d_%H%M%S.json", localtime;
 
 	$self->output_file($report_fn);
 
-	# create a default formatter for display of text results
-	# TODO: use Tap::Formatter::Console when run in real console
-	# and Tap::Formatter::File when running redirected to file
-	$self->console(TAP::Formatter::File->new($args));
+	# quiet:  -1 // prove -q
+	# normal:  0 // prove
+	# verbose: 1 // prove - v
+	my $fmt_verb = $ENV{TAP_FORMATTER_VERBOSITY} // 1;
+	$args->{verbosity} = $fmt_verb;
+	$self->{verbosity} = $fmt_verb;
+
+	if (-t STDOUT) {
+		$self->console(TAP::Formatter::Console->new($args));
+
+	} else {
+		$self->console(TAP::Formatter::File->new($args));
+	}
 
 	# consider args correct and pass them directly to base class
 	foreach my $key (keys %$args) {
 		$self->$key($args->{$key}) if ($self->can($key));
 	}
 
-	# quiet:  -1 // prove -q
-	# normal:  0 // prove
-	# verbose: 1 // prove - v
-	my $fmt_verb = $ENV{TAP_FORMATTER_VERBOSITY} // 1;
-	$self->verbosity($fmt_verb);
 
 	return $self;
 }
@@ -94,7 +106,8 @@ sub open_test {
 	my $session = $self->session_class->new({ test => $test,
 	                                          parser => $parser,
 	                                          formatter => $self,
-	                           console_session => $console_session});
+	                           console_session => $console_session,
+	                           verbosity => $self->verbosity});
 
 	push @{ $self->sessions }, $session;
 
@@ -149,10 +162,34 @@ sub _output {
 }
 
 
+sub wait_info {
+	my ($status) = @_;
+
+	if (WIFEXITED($status)) {
+		my $code = WEXITSTATUS($status);
+		return "normally with code $code";
+
+	} elsif (WIFSIGNALED($status)) {
+		my $signal = WTERMSIG($status);
+		return "terminated by signal $signal";
+
+	} elsif (WIFSTOPPED($status)) {
+		return "stopped";
+
+	} else {
+		return "unknown";
+	}
+}
+
+
 sub create_report {
 	my ($r, $verbosity) = @_;
 
 	my %res = ();
+
+	my $env = collect_run_env();
+
+	$res{'run_env'} = $env;
 
 	# status
 
@@ -202,6 +239,10 @@ sub create_report {
 
 		$tres{exit_status} = $test->{exit};
 		$tres{wait_status} = $test->{wait};
+		if ($tres{exit_status}) {
+			$tres{exit_info} = strerror($tres{exit_status});
+		}
+		$tres{wait_info} = wait_info($test->{wait});
 		$tres{status} = $test->{test_status};
 		$tres{todo_passed} = $test->{todo_passed};
 		$tres{problems} = $test->{has_problems};
@@ -215,6 +256,7 @@ sub create_report {
 		$tres{todo} = $test->{todo};
 		$tres{skipped} = $test->{skipped};
 		$tres{elapsed} = $test->{elapsed_time};
+		$tres{started_at} = $test->{started_at};
 		$tres{time_wall} = $test->{time_wall};
 		$tres{time_user} = $test->{time_user};
 		$tres{time_user_child} = $test->{time_user_child};
@@ -276,6 +318,17 @@ sub create_report {
 			if (scalar keys %misc) {
 				$tres{tc_misc} = \%misc;
 			}
+
+			my @tc_elapsed = ();
+
+			my $prev = $test->{started_at};
+
+			for my $end (@{$test->{tc_end_time}}) {
+				push @tc_elapsed, $end - $prev;
+				$prev = $end;
+			}
+
+			$tres{tc_elapsed} = \@tc_elapsed;
 		}
 
 		$tests{$tname} = \%tres;
@@ -289,6 +342,77 @@ sub create_report {
 	$res{tests} = \%tests;
 
 	return \%res;
+}
+
+
+sub collect_run_env {
+
+	my %info = ();
+
+	my %env = ();
+
+	# environment variables affecting us
+	my @vars = (qw /TEST_ANGIE_BINARY TEST_ANGIE_VALGRIND TEST_ANGIE_CATLOG
+	            TEST_ANGIE_VERBOSE TEST_ANGIE_UNSAFE TEST_ANGIE_TC
+	            TEST_ANGIE_GLOBALS TEST_ANGIE_GLOBALS_HTTP
+	            TEST_ANGIE_GLOBALS_STREAM TEST_ANGIE_DOCKER_REGISTRY
+	            TEST_ANGIE_JOBS \
+	            ASAN_OPTIONS CFLAGS CXXFLAGS LDFLAGS SHELL USER PATH/);
+
+	foreach my $var (@vars) {
+		$env{$var} = $ENV{$var};
+	}
+
+	$info{env} = \%env;
+
+	# selected binary to run
+	my $NGINX = defined $ENV{TEST_ANGIE_BINARY} ? $ENV{TEST_ANGIE_BINARY}
+	: '../objs/angie';
+	$info{binary} = $NGINX;
+
+	# where we are?
+	$info{cwd} = getcwd;
+
+	# who we are?
+	$info{uid} = $<;
+
+	# our limits
+	my @limits = split /\n/, `sh -c "ulimit -a" 2>&1`;
+	$info{ulimit} = \@limits;
+
+	# free memory, if possible
+	if ($^O eq 'linux') {
+		my @mem = split /\n/, `free -m 2>&1`;
+		$info{freemem} = \@mem;
+
+	} else {
+		# no good way to get freemem on BSD without installing extra tools
+		# other system are too rare to care
+		$info{freemem} = [];
+	}
+
+	# all the information the binary can give us
+	my $vversion = `$NGINX -V 2>&1`;
+	my @lines =  split /\n/,  $vversion;
+	$info{verbose_version} = \@lines;
+
+	# compiled in modules
+	my $am = `$NGINX -m 2>&1`;
+	my @modules = split /\n/,  $am;
+	$info{modules} = \@modules;
+
+	# final binary configuration
+	my %be = ();
+	my $lines = `$NGINX --build-env 2>&1`;
+	my @build_env =  split /\n/,  $lines;
+	for my $line (@build_env) {
+		my ($item, $value) = $line =~  /^(\w+)\s*:\s+(.*)$/;
+		$be{$item} = $value;
+	}
+
+	$info{build_env} = \%be;
+
+	return \%info;
 }
 
 1;

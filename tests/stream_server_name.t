@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 
+# (C) 2026 Web Server LLC
 # (C) Maxim Dounin
 # (C) Andrey Zelenkov
 # (C) Sergey Kandaurov
@@ -25,11 +26,9 @@ use Test::Nginx::Stream qw/ stream /;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-plan(skip_all => 'win32') if $^O eq 'MSWin32';
-
 my $t = Test::Nginx->new()->has(qw/http rewrite/)
 	->has(qw/stream stream_ssl stream_return sni socket_ssl_sni/)
-	->has_daemon('openssl')
+	->has_daemon('openssl')->plan(19)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -153,7 +152,7 @@ foreach my $name ('localhost') {
 		or die "Can't create certificate for $name: $!\n";
 }
 
-$t->try_run('no server_name')->plan(19);
+$t->run();
 
 ###############################################################################
 

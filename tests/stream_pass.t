@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 
+# (C) 2026 Web Server LLC
 # (C) Sergey Kandaurov
 # (C) Nginx, Inc.
 
@@ -24,7 +25,8 @@ select STDOUT; $| = 1;
 
 my $t = Test::Nginx->new()
 	->has(qw/stream stream_ssl stream_pass stream_ssl_preread stream_geo/)
-	->has(qw/http http_ssl sni socket_ssl_sni/)->has_daemon('openssl');
+	->has(qw/http http_ssl sni socket_ssl_sni/)->has_daemon('openssl')
+	->plan(6);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -110,20 +112,14 @@ foreach my $name ('localhost') {
 		or die "Can't create certificate for $name: $!\n";
 }
 
-$t->try_run('no pass module')->plan(6);
+$t->run();
 
 ###############################################################################
 
 # passing either to HTTP or HTTPS backend, depending on server_name
-
-TODO: {
-todo_skip 'no socket peek', 2 if $^O eq 'MSWin32' or $^O eq 'solaris';
-
 like(http_get('/'), qr/200 OK/, 'pass');
 like(http_get('/', SSL => 1, SSL_hostname => 'sni',
 	PeerAddr => '127.0.0.1:' . port(8080)), qr/200 OK/, 'pass ssl');
-
-}
 
 like(http_get('/', SSL => 1, SSL_hostname => 'sni'), qr/200 OK/,
 	'pass ssl handshaked');

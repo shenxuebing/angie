@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 
+# (C) 2026 Web Server LLC
 # (C) Sergey Kandaurov
 # (C) Nginx, Inc.
 
@@ -11,6 +12,7 @@ use warnings;
 use strict;
 
 use Test::More;
+use Socket qw/ CRLF /;
 
 BEGIN { use FindBin; chdir($FindBin::Bin); }
 
@@ -68,8 +70,13 @@ my @uwsgiopts = ();
 
 if ($uwsgihelp !~ /--wsgi-file/) {
 	# uwsgi has no python support, maybe plugin load is necessary
+
+	my ($mj, $mi, $pa) = `python3 -V` =~ /Python (\w+)\.(\w+)\.(\w+)/;
+
 	push @uwsgiopts, '--plugin', 'python';
-	push @uwsgiopts, '--plugin', 'python3';
+	push @uwsgiopts, '--plugin', "python$mj";
+	push @uwsgiopts, '--plugin', "python$mj$mi";
+	push @uwsgiopts, '--plugin', "python$mj$mi$pa";
 }
 
 open OLDERR, ">&", \*STDERR; close STDERR;
@@ -113,15 +120,13 @@ EOF
 sub http_get_chunked {
 	my ($url, $body) = @_;
 	my $length = sprintf("%x", length $body);
-	return http(<<EOF);
+	$body = $length ? $length . CRLF . $body . CRLF : '';
+	$body .= '0' . CRLF . CRLF;
+	return http(<<EOF . $body);
 GET $url HTTP/1.1
 Host: localhost
 Connection: close
 Transfer-Encoding: chunked
-
-$length
-$body
-0
 
 EOF
 }

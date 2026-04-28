@@ -270,6 +270,7 @@ typedef struct {
     ngx_http_complex_value_t        *ssl_certificate_key;
     ngx_ssl_cache_t                 *ssl_certificate_cache;
     ngx_array_t                     *ssl_passwords;
+    ngx_open_file_t                 *ssl_keylog_file;
 
 #if (NGX_HTTP_PROXY_MULTICERT)
     ngx_array_t                     *ssl_certificates;
@@ -430,6 +431,7 @@ struct ngx_http_upstream_s {
 
 #if (NGX_HTTP_SSL || NGX_COMPAT)
     ngx_str_t                        ssl_name;
+    ngx_str_t                        ssl_alpn_protocol;
 #endif
 
     ngx_http_cleanup_pt             *cleanup;
@@ -451,6 +453,7 @@ struct ngx_http_upstream_s {
     unsigned                         request_body_sent:1;
     unsigned                         request_body_blocked:1;
     unsigned                         header_sent:1;
+    unsigned                         response_received:1;
 #if (NGX_HTTP_V3)
     unsigned                         h3:1;
     unsigned                         h3_started:1;

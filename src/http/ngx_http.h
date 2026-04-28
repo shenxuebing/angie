@@ -119,6 +119,8 @@ ngx_int_t ngx_http_parse_header_line(ngx_http_request_t *r, ngx_buf_t *b,
     ngx_uint_t allow_underscores);
 ngx_table_elt_t *ngx_http_parse_multi_header_lines(ngx_http_request_t *r,
     ngx_table_elt_t *headers, ngx_str_t *name, ngx_str_t *value);
+ngx_table_elt_t *ngx_http_parse_cookie_lines(ngx_http_request_t *r,
+    ngx_table_elt_t *headers, ngx_str_t *name, ngx_str_t *value);
 ngx_table_elt_t *ngx_http_parse_set_cookie_lines(ngx_http_request_t *r,
     ngx_table_elt_t *headers, ngx_str_t *name, ngx_str_t *value);
 ngx_int_t ngx_http_arg(ngx_http_request_t *r, u_char *name, size_t len,
@@ -139,8 +141,8 @@ ngx_int_t ngx_http_post_request(ngx_http_request_t *r,
     ngx_http_posted_request_t *pr);
 ngx_int_t ngx_http_set_virtual_server(ngx_http_request_t *r,
     ngx_str_t *host);
-ngx_int_t ngx_http_validate_host(ngx_str_t *host, ngx_pool_t *pool,
-    ngx_uint_t alloc);
+ngx_int_t ngx_http_validate_host(ngx_str_t *host, in_port_t *port,
+    ngx_pool_t *pool, ngx_uint_t alloc);
 void ngx_http_close_request(ngx_http_request_t *r, ngx_int_t rc);
 void ngx_http_finalize_request(ngx_http_request_t *r, ngx_int_t rc);
 void ngx_http_free_request(ngx_http_request_t *r, ngx_int_t rc);

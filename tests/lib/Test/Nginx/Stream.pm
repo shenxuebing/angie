@@ -81,7 +81,9 @@ sub new {
 
 sub DESTROY {
 	my $self = shift;
-	$self->{_socket}->close();
+	if ($self->{_socket}) {
+		$self->{_socket}->close();
+	}
 }
 
 sub write {
@@ -138,6 +140,13 @@ sub read {
 		$buf = '' if defined $bytes_read && $bytes_read == 0;
 
 		last;
+	}
+
+	if (!defined $buf && ref $self->{_socket} eq 'IO::Socket::SSL'
+		&& $IO::Socket::SSL::VERSION >= 2.091
+		&& $IO::Socket::SSL::VERSION <= 2.095)
+	{
+		$buf = '';
 	}
 
 	log_in($buf);
