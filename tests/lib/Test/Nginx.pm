@@ -231,6 +231,7 @@ sub has_module($) {
 		ntls	=> '--with-ntls',
 		split_clients
 			=> '(?s)^(?!.*--without-http_split_clients_module)',
+		tunnel	=> '(?s)^(?!.*--without-http_tunnel_module)',
 		stream	=> '--with-stream((?!\S)|=dynamic)',
 		stream_access
 			=> '(?s)^(?!.*--without-stream_access_module)',
@@ -240,6 +241,8 @@ sub has_module($) {
 			=> '(?s)^(?!.*--without-stream_limit_conn_module)',
 		stream_map
 			=> '(?s)^(?!.*--without-stream_map_module)',
+		stream_metric
+			=> '(?s)^(?!.*--without-stream_metric_module)',
 		stream_mqtt_preread
 			=> '--with-stream_mqtt_preread_module',
 		stream_pass

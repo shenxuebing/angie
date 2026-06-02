@@ -113,6 +113,7 @@ struct ngx_ssl_ocsp_ctx_s {
 
     ngx_resolver_t              *resolver;
     ngx_msec_t                   resolver_timeout;
+    ngx_resolver_ctx_t          *resolve;
 
     ngx_msec_t                   timeout;
 
@@ -1341,6 +1342,10 @@ ngx_ssl_ocsp_done(ngx_ssl_ocsp_ctx_t *ctx)
     ngx_log_debug0(NGX_LOG_DEBUG_EVENT, ctx->log, 0,
                    "ssl ocsp done");
 
+    if (ctx->resolve) {
+        ngx_resolve_name_done(ctx->resolve);
+    }
+
     if (ctx->peer.connection) {
         ngx_close_connection(ctx->peer.connection);
     }
@@ -1433,7 +1438,10 @@ ngx_ssl_ocsp_request(ngx_ssl_ocsp_ctx_t *ctx)
         resolve->data = ctx;
         resolve->timeout = ctx->resolver_timeout;
 
+        ctx->resolve = resolve;
+
         if (ngx_resolve_name(resolve) != NGX_OK) {
+            ctx->resolve = NULL;
             ngx_ssl_ocsp_error(ctx);
             return;
         }
@@ -1522,6 +1530,7 @@ ngx_ssl_ocsp_resolve_handler(ngx_resolver_ctx_t *resolve)
     }
 
     ngx_resolve_name_done(resolve);
+    ctx->resolve = NULL;
 
     ngx_ssl_ocsp_connect(ctx);
     return;
@@ -1529,6 +1538,8 @@ ngx_ssl_ocsp_resolve_handler(ngx_resolver_ctx_t *resolve)
 failed:
 
     ngx_resolve_name_done(resolve);
+    ctx->resolve = NULL;
+
     ngx_ssl_ocsp_error(ctx);
 }
 
@@ -2713,35 +2724,34 @@ ngx_ssl_ocsp_create_key(ngx_ssl_ocsp_ctx_t *ctx)
 static u_char *
 ngx_ssl_ocsp_log_error(ngx_log_t *log, u_char *buf, size_t len)
 {
-    u_char              *p;
+    u_char              *p, *last;
     ngx_ssl_ocsp_ctx_t  *ctx;
 
     p = buf;
+    last = buf + len;
+
+    ngx_log_add_tag(log, "ocsp");
 
     if (log->action) {
-        p = ngx_snprintf(buf, len, " while %s", log->action);
-        len -= p - buf;
-        buf = p;
+        p = ngx_log_action(log, p, last, log->action);
     }
 
     ctx = log->data;
 
     if (ctx) {
-        p = ngx_snprintf(buf, len, ", responder: %V", &ctx->host);
-        len -= p - buf;
-        buf = p;
+        p = ngx_log_property(log, p, last, ngx_core_log_prop(OCSP_RESPONDER),
+                             "%V", &ctx->host);
     }
 
     if (ctx && ctx->peer.name) {
-        p = ngx_snprintf(buf, len, ", peer: %V", ctx->peer.name);
-        len -= p - buf;
-        buf = p;
+        ngx_log_add_tag(log, "peer");
+        p = ngx_log_property(log, p, last, ngx_core_log_prop(OCSP_PEER),
+                             "%V", ctx->peer.name);
     }
 
     if (ctx && ctx->name) {
-        p = ngx_snprintf(buf, len, ", certificate: \"%s\"", ctx->name);
-        len -= p - buf;
-        buf = p;
+        p = ngx_log_property(log, p, last, ngx_core_log_prop(OCSP_CERT),
+                             "%s", ctx->name);
     }
 
     return p;

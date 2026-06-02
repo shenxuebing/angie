@@ -9,6 +9,137 @@
 
 <change type="feature">
 <para lang="ru">
+произвольно конфигурируемый сбор статистики с помощью модуля Metric в
+STREAM; позволяет, используя различные методы (счетчики, гистограммы,
+скользящие средние и др.), агрегировать любые данные на разных стадиях
+обработки соединения в реальном времени с помощью переменных по заданным ключам
+и отдавать их в секции "/status/stream/metric_zones/" API статистики (с
+поддержкой Prometheus).
+</para>
+<para lang="en">
+the Metrics module enabling arbitrary, real‑time STREAM metrics collection
+with fully configurable aggregation methods (counters, histograms,
+moving averages, etc.); it allows tracking processing data at any stage,
+grouped by custom keys, and exposes the metrics via the
+"/status/stream/metric_zones/" API section (including Prometheus support).
+</para>
+</change>
+
+<change type="bugfix">
+при использовании параметра window метрики average mean результат
+мог посчитаться неправильно, в частности, вскоре после запуска системы
+на Linux значения могли оставаться нулевыми.
+<para lang="ru">
+</para>
+<para lang="en">
+when using the window parameter of the average mean metric, the result
+could be calculated incorrectly, in particular, shortly after starting
+the system on Linux, the values could remain zero.
+</para>
+</change>
+
+<change type="bugfix">
+значения метрик count и histogram могли неправильно выводиться на 32-битных
+платформах при достижении 2^32-1.
+<para lang="ru">
+</para>
+<para lang="en">
+the values of count and histogram metrics could lead to incorrect output
+on 32-bit platforms when they reach 2^32-1.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+переменная "$metric_*" возвращала заданную строку, а не ключ вместе с
+подсчитанным значением метрики, из-за чего для получения значения приходилось
+использовать переменную "$metric_*_value".
+</para>
+<para lang="en">
+the "$metric_*" variable returned the specified string, not the key
+along with the calculated metric value. The "$metric_*_value" variable had
+to be used in order to get the actual value.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+если в рамках одного запроса последовательно задавались переменные
+"$metric_*" или "$metric_*_key" для нескольких зон метрик, то обновление
+статистики или получение связанных переменных происходило по ключу
+последней указанной зоны.
+</para>
+<para lang="en">
+if "$metric_*" or "$metric_*_key" variables were set sequentially for
+multiple metric zones within a single request, updating statistics or
+retrieving related variables used the key of the last specified zone.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+изменения режимов метрик и их параметров в директивах "metric_zone"
+и "metric_complex_zone" могли привести к падению рабочего процесса
+при перезагрузке конфигурации.
+</para>
+<para lang="en">
+alterations to the metric modes and their parameters in the "metric_zone"
+and "metric_complex_zone" directives could crash a worker process
+if the configuration is reloaded.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при использовании нескольких символов '=' в директиве "metric" обрезался ключ.
+</para>
+<para lang="en">
+when using multiple '=' characters in the "metric" directive,
+the key was truncated.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+теперь максимальная частота логгирования ошибок может быть ограничена
+с помощью параметра rate директивы error_log;
+по умолчанию используется ограничение в 1000 сообщений в секунду.
+<br/>
+Спасибо Максиму Дунину (freenginx).
+</para>
+<para lang="en">
+now maximum error logging rate can be limited
+with the "rate" parameter of the "error_log" directive;
+by default the limit is 1000 messages per second.
+<br/>
+Thanks to Maxim Dounin (freenginx).
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+улучшена совместимость с ACME-серверами, не полностью соответствующими
+спецификации протокола, в частности с SSL.com.
+</para>
+<para lang="en">
+enhanced compatibility with servers that do not strictly comply with
+the ACME protocol, particularly SSL.com.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+быстрое завершение Docker-контейнеров сразу после старта могло вызывать падение
+рабочего процесса в Docker-модуле.
+</para>
+<para lang="en">
+rapid termination of Docker containers immediately after start could cause
+a worker process to crash in a Docker module.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
 поддержка External Account Binding (EAB), позволяющая связывать
 ACME-аккаунт с внешним аккаунтом на стороне УЦ с использованием
 HMAC-аутентификации.
@@ -114,26 +245,25 @@ none are configured in Angie, the default server "127.0.0.1:53" is used.
 
 <change type="feature">
 <para lang="ru">
-вся функциональность nginx 1.29.8, за исключением HTTP-модуля "sticky",
-директивы "ssl_ech_file" и связанных с ней переменных ("$ssl_ech_status"
-и "$ssl_ech_outer_server_name"), а также изменений в поведении директивы
-"keepalive" HTTP модуля "upstream". Поддержка Encrypted Client Hello уже
-реализована при помощи директивы "ssl_encrypted_hello_key".
-Функциональность HTTP-модуля "sticky" была ранее независимо реализована
-в angie; специфичная для nginx конфигурация не поддерживается.
-Включение keepalive по-умолчанию может привести к непредвиденным последствиям,
-которые не устраняются поддержкой предложенной опции "local".
+вся функциональность nginx 1.31.1, за исключением HTTP-модуля "sticky",
+модуля балансировки "least_time", директивы "ssl_ech_file" и связанных
+с ней переменных ("$ssl_ech_status" и "$ssl_ech_outer_server_name"),
+а также изменений в поведении директивы "keepalive" HTTP модуля "upstream".
+Поддержка Encrypted Client Hello уже реализована при помощи директивы
+"ssl_encrypted_hello_key". Функциональность HTTP-модуля "sticky" была ранее
+независимо реализована в angie; Включение keepalive по-умолчанию может
+привести к непредвиденным последствиям, которые не устраняются поддержкой
+предложенной опции "local".
 </para>
 <para lang="en">
-all functionality of nginx 1.29.8 except the HTTP "sticky" module,
-the "ssl_ech_file" directive, and related variables ("ssl_ech_status" and
-"ssl_ech_outer_server_name"), and changes of the "keepalive" directive
-in the "upstream" HTTP module. The Encrypted Client Hello is already supported
-using the "ssl_encrypted_hello_key" variable. The HTTP "sticky" module
-functionality was independently implemented in angie earlier; nginx-specific
-configuration is not supported. Enabling keepalive by default may lead to
-unexpected consequences that may not be mitigated by the suggested "local"
-option.
+all functionality of nginx 1.31.1 except the HTTP "sticky" module, "least_time"
+balancing module, the "ssl_ech_file" directive, and related variables
+("ssl_ech_status" and "ssl_ech_outer_server_name"), and changes of the
+"keepalive" directive in the "upstream" HTTP module. The Encrypted Client
+Hello is already supported using the "ssl_encrypted_hello_key" variable.
+The HTTP "sticky" module functionality was independently implemented in
+angie earlier. Enabling keepalive by default may lead to unexpected
+consequences that may not be mitigated by the suggested "local" option.
 </para>
 </change>
 
@@ -145,6 +275,148 @@ option.
 <para lang="en">
 the "ssl_keylog_file" and "proxy_ssl_keylog_file" directives specify the file
 to log SSL keys.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+Добавлена возможность фильтрации сообщений об ошибках. Директива "error_log"
+теперь поддерживает параметр "filter=", который позволяет указать условия,
+при которых ошибка будет записана в журнал. Новая директива
+"error_log_user_tag" позволяет задать переменную, которая может быть
+использована в условии фильтрации.
+</para>
+<para lang="en">
+Added the ability to filter error log messages. The "error_log" directive
+now supports "filter=" parameter that specifies conditions required to
+write an error into log.  The new "error_log_user_tag" directive
+specifies a variable that can be used in filter.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+ошибки при работе директивы "ssl_keylog_file" могли нарушать обработку
+произвольного соединения и приводить к другим ошибкам.
+</para>
+<para lang="en">
+errors encountered while processing the ssl_keylog_file directive
+might interrupt random connection or lead to other errors.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.11.6" date="2026-05-25">
+
+<change type="security">
+<para lang="ru">
+при использовании директивы "rewrite" с регулярным  выражением, содержащим
+вложенные захваты PCRE, и строкой замены, ссылающейся на несколько таких
+захватов, атакующий при некоторых независящих от него обстоятельствах мог
+вызвать падение рабочего процесса, а на системах без рандомизации адресного
+пространства — выполнение произвольного кода (CVE-2026-9256);
+исправление портировано из nginx 1.31.1.
+</para>
+<para lang="en">
+when using the "rewrite" directive with a regex containing nested PCRE
+captures and a replacement string referencing multiple such captures,
+an attacker, given conditions beyond the attacker's control, could cause
+a worker process crash, or, on systems without address space layout
+randomization, arbitrary code execution (CVE-2026-9256);
+the fix was ported from nginx 1.31.1.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.11.5" date="2026-05-15">
+
+<change type="security">
+<para lang="ru">
+при использовании директивы "rewrite" с неименованным захватом (например,
+$1, $2) и строкой замены, содержащей символ "?", за которой следует директива
+"rewrite", "if" или "set", атакующий при некоторых независящих от него
+обстоятельствах мог вызвать падение рабочего процесса, а на системах без
+рандомизации адресного пространства — выполнение произвольного кода
+(CVE-2026-42945);
+исправление портировано из nginx 1.31.0.
+</para>
+<para lang="en">
+when the "rewrite" directive with an unnamed capture (e.g., $1, $2) and a
+replacement string containing "?" was followed by a "rewrite", "if", or "set"
+directive, an attacker, given conditions beyond the attacker's control, could
+cause a worker process crash and, on systems without address space layout
+randomization, arbitrary code execution (CVE-2026-42945);
+the fix was ported from nginx 1.31.0.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при использовании директивы "ssl_ocsp" во время обработки ответов DNS-сервера
+могло произойти обращение к ранее освобождённой памяти, что позволяло атакующему
+повредить память рабочего процесса или вызвать его падение (CVE-2026-40701);
+исправление портировано из nginx 1.31.0.
+</para>
+<para lang="en">
+when using the "ssl_ocsp" directive, a use of previously freed memory could
+occur while processing DNS server responses, allowing an attacker to corrupt
+the worker process memory or cause its crash (CVE-2026-40701);
+the fix was ported from nginx 1.31.0.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при использовании HTTP/3 атакующий мог выполнить подмену IP-адреса и тем самым
+обойти ограничения или авторизацию в некоторых конфигурациях (CVE-2026-40460);
+исправление портировано из nginx 1.31.0.
+</para>
+<para lang="en">
+when using HTTP/3, an attacker could spoof the IP address and thereby bypass
+restrictions or authorization in some configurations (CVE-2026-40460);
+the fix was ported from nginx 1.31.0.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при использовании директив "scgi_pass" или "uwsgi_pass" атакующий, находясь
+в позиции посредника (MITM) и контролируя ответы проксируемого сервера, мог
+вызвать избыточное выделение памяти или чтение за пределами буфера, что
+позволяло отправить клиенту содержимое памяти рабочего процесса или вызвать
+его падение (CVE-2026-42946);
+исправление портировано из nginx 1.31.0.
+</para>
+<para lang="en">
+when "scgi_pass" or "uwsgi_pass" was configured, an attacker in a
+man-in-the-middle (MITM) position, controlling responses from a proxied
+server, could cause excessive memory allocation or an over-read of data,
+leading to the disclosure of worker process memory to the client or a
+process crash (CVE-2026-42946);
+the fix was ported from nginx 1.31.0.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при обработке специально созданного ответа с декодированием из UTF-8 через
+директиву "charset_map" могло происходить чтение данных за границами буфера
+рабочего процесса, что позволяло атакующему при некоторых независящих от
+него обстоятельствах отправить клиенту ограниченное содержимое памяти
+рабочего процесса или вызвать его падение (CVE-2026-42934);
+исправление портировано из nginx 1.31.0.
+</para>
+<para lang="en">
+when processing a specially crafted response with UTF-8 decoding via the
+"charset_map" directive, an out-of-bounds read could occur in the worker
+process, allowing an attacker, given conditions beyond the attacker's control,
+to send limited worker process memory contents to the client or cause process
+crash (CVE-2026-42934);
+the fix was ported from nginx 1.31.0.
 </para>
 </change>
 

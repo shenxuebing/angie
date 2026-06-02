@@ -333,8 +333,8 @@ struct ngx_http_acme_sh_alpn_s {
 
 
 static u_char *ngx_http_acme_log_error(ngx_log_t *log, u_char *buf, size_t len);
-static u_char *ngx_http_acme_client_log_handler(ngx_http_request_t *r,
-    ngx_http_request_t *sr, u_char *buf, size_t len);
+static u_char *ngx_http_acme_client_log_handler(ngx_log_t *log, u_char *buf,
+    u_char *last, void *data);
 #if (NGX_DEBUG)
 static void ngx_log_acme_debug_core(ngx_log_t *log, const char *prefix,
     ngx_str_t *name, const char *fmt, va_list args);
@@ -497,7 +497,6 @@ static ngx_int_t ngx_data_object_vget_str(ngx_data_item_t *obj, ngx_str_t *s,
     va_list args);
 static ngx_int_t ngx_data_object_get_str(ngx_data_item_t *obj, ngx_str_t *s,
     ...);
-static int ngx_data_object_str_eq(ngx_data_item_t *obj, const char *value, ...);
 
 static ngx_int_t ngx_str_eq(ngx_str_t *s1, const char *s2);
 static ngx_int_t ngx_strcase_eq(ngx_str_t *s1, char *s2);
@@ -720,16 +719,21 @@ static ngx_api_entry_t  ngx_api_acme_client_entry = {
 static u_char *
 ngx_http_acme_log_error(ngx_log_t *log, u_char *buf, size_t len)
 {
-    u_char  *p = buf;
-
+    u_char                     *p, *last;
     ngx_http_log_ctx_t         *ctx;
     ngx_http_acme_main_conf_t  *amcf;
 
     ctx = log->data;
     amcf = ngx_container_of(ctx, ngx_http_acme_main_conf_t, log_ctx);
 
+    p = buf;
+    last = buf + len;
+
+    ngx_log_add_tag(log, "acme");
+
     if (amcf->current != NULL) {
-        p = ngx_snprintf(p, len, ", ACME client: %V", &amcf->current->name);
+        p = ngx_log_property(log, p, last, ngx_http_log_prop(ACME_CLIENT),
+                             "%V", &amcf->current->name);
     }
 
     return p;
@@ -737,18 +741,24 @@ ngx_http_acme_log_error(ngx_log_t *log, u_char *buf, size_t len)
 
 
 static u_char *
-ngx_http_acme_client_log_handler(ngx_http_request_t *r, ngx_http_request_t *sr,
-    u_char *buf, size_t len)
+ngx_http_acme_client_log_handler(ngx_log_t *log, u_char *buf, u_char *last,
+    void *data)
 {
     u_char                   *p;
+    ngx_http_log_ctx_t       *ctx;
+    ngx_http_request_t       *r;
     ngx_http_acme_session_t  *ses;
+
+    ctx = data;
+    r = ctx->request;
 
     p = buf;
 
     ses = ngx_http_get_module_ctx(r, ngx_http_acme_module);
 
     if (ses && ses->client) {
-        p = ngx_snprintf(p, len, ", ACME client: %V", &ses->client->name);
+        p = ngx_log_property(log, p, last, ngx_http_log_prop(ACME_CLIENT),
+                             "%V", &ses->client->name);
     }
 
     return p;
@@ -2273,24 +2283,28 @@ static ngx_uint_t
 ngx_http_acme_cert_validity(ngx_acme_client_t *cli, ngx_uint_t log_diagnosis,
     const u_char *cert_data, size_t cert_len, time_t *cert_expiry)
 {
-    int               type, i, found;
+    int                     type, i, found;
 #if defined(OPENSSL_IS_BORINGSSL) || defined(OPENSSL_IS_AWSLC)
-    size_t            j;
+    size_t                  j;
 #else
-    int               j;
+    int                     j;
 #endif
-    BIO              *bio;
-    X509             *x509;
-    u_char           *s;
-    time_t            expiry;
-    ngx_uint_t        rc, di;
-    ngx_str_t         domain;
-    X509_NAME        *subj_name;
-    ASN1_STRING      *value;
-    GENERAL_NAME     *name;
-    GENERAL_NAMES    *sans;
-    const ASN1_TIME  *t;
-    X509_NAME_ENTRY  *entry;
+    BIO                    *bio;
+    X509                   *x509;
+    u_char                 *s;
+    time_t                  expiry;
+    ngx_str_t               domain;
+#if (OPENSSL_VERSION_NUMBER < 0x40000000L)
+    X509_NAME              *subj_name;
+#else
+    const X509_NAME        *subj_name;
+#endif
+    ngx_uint_t              rc, di;
+    GENERAL_NAME           *name;
+    GENERAL_NAMES          *sans;
+    const ASN1_TIME        *t;
+    const ASN1_STRING      *value;
+    const X509_NAME_ENTRY  *entry;
 
     bio = BIO_new_mem_buf(cert_data, (int) cert_len);
 
@@ -2767,34 +2781,58 @@ static int
 ngx_http_acme_server_error(ngx_http_acme_session_t *ses,
     const char *default_msg)
 {
+    u_char           *p, *end;
     ngx_str_t         s;
     ngx_data_item_t  *json;
+    u_char            errstr[NGX_MAX_CONF_ERRSTR];
+
+    p = errstr;
+    end = p + NGX_MAX_CONF_ERRSTR;
 
     if (default_msg) {
-        ngx_log_error(NGX_LOG_ERR, ses->log, 0,
-                      "ACME server error: %s (http status code = %d)",
-                      default_msg, ses->status_code);
+        p = ngx_slprintf(p, end, "ACME: %s", default_msg);
     }
 
     json = NULL;
 
-    if (ses->json) {
-        if (ngx_http_acme_server_error_type(ses, NULL)) {
-            json = ses->json;
+    if (ses->json != NULL) {
+        /*
+         * If an error occurs, the ACME server should set the "Content-Type"
+         * header to "application/problem+json", as specified in RFC 7807 (see
+         * RFC 8555, Sec. 6.7, for details).  However, some servers don't
+         * comply, so we can't rely on this.  Instead, we look for and check
+         * the "type" field in the JSON response.
+         */
+        ngx_str_set(&s, "error");
 
-        } else {
-            ngx_str_set(&s, "error");
-            json = ngx_data_object_find(ses->json, &s);
+        json = ngx_data_object_find(ses->json, &s);
+
+        if (json == NULL) {
+            json = ses->json;
+        }
+
+        if (ngx_data_object_get_str(json, &s, "type", 0) != NGX_OK
+            || s.len < 27
+            || ngx_strncasecmp(s.data, (u_char *) "urn:ietf:params:acme:error:",
+                               27)
+               != 0)
+        {
+            json = NULL;
         }
     }
 
-    if (json) {
+    if (json != NULL) {
         if (ngx_data_object_get_str(json, &s, "detail", 0) != NGX_OK) {
             ngx_str_set(&s, "N/A");
         }
 
-        ngx_log_error(NGX_LOG_ERR, ses->log, 0, "ACME server error message: %V",
-                      &s);
+        p = ngx_slprintf(p, end, "%s server returned: %V",
+                         (p != errstr) ? "," : "ACME", &s);
+    }
+
+    if (p != errstr) {
+        ngx_log_error(NGX_LOG_ERR, ses->log, 0, "%*s", (size_t) (p - errstr),
+                      errstr);
     }
 
     return !!json;
@@ -2804,19 +2842,12 @@ ngx_http_acme_server_error(ngx_http_acme_session_t *ses,
 static int
 ngx_http_acme_server_error_type(ngx_http_acme_session_t *ses, const char *type)
 {
-    int         ret;
-    ngx_str_t  *s;
+    ngx_str_t  s;
 
-    s = &ses->content_type;
-
-    ret = (s->len >= 24) && (ngx_strncasecmp(s->data,
-                               (u_char *) "application/problem+json", 24) == 0);
-
-    if (ret && type != NULL) {
-        ret = ngx_data_object_str_eq(ses->json, type, "type", 0);
-    }
-
-    return ret;
+    return (ses->json != NULL
+            && ngx_data_object_get_str(ses->json, &s, "type", 0) == NGX_OK
+            && s.len == ngx_strlen(type)
+            && ngx_strncmp(s.data, type, s.len) == 0);
 }
 
 
@@ -5999,23 +6030,6 @@ ngx_data_object_get_str(ngx_data_item_t *obj, ngx_str_t *s, ...)
 }
 
 
-static int
-ngx_data_object_str_eq(ngx_data_item_t *obj, const char *value, ...)
-{
-    va_list    args;
-    ngx_str_t  v;
-    ngx_int_t  rc;
-
-    va_start(args, value);
-    rc = ngx_data_object_vget_str(obj, &v, args);
-    va_end(args);
-
-    return rc == NGX_OK
-           && v.len == ngx_strlen(value)
-           && ngx_strncmp(v.data, value, v.len) == 0;
-}
-
-
 static ngx_int_t
 ngx_http_acme_extract_uri(ngx_str_t *url, ngx_str_t *uri)
 {
@@ -6593,7 +6607,12 @@ ngx_http_acme_client(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     ngx_str_set(&loc_name, "@acme");
 
-    ngx_str_set(&loc_conf, "proxy_pass $__acme_server;}");
+    /*
+     * Some ACME servers require SNI in requests, so we add
+     * "proxy_ssl_server_name on;"
+     */
+    ngx_str_set(&loc_conf, "proxy_pass $__acme_server; "
+                           "proxy_ssl_server_name on; }");
 
     amcf->ctx = ngx_http_client_create_location(cf, &loc_name, &loc_conf);
     if (amcf->ctx == NULL) {

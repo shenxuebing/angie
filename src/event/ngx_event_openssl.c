@@ -325,6 +325,7 @@ ngx_ssl_keylogger(const ngx_ssl_conn_t *ssl_conn, const char *line)
     SSL_CTX           *ssl_ctx;
     ngx_err_t          err;
     ngx_ssl_t         *ssl;
+    ngx_connection_t  *c;
 
     static ngx_str_t   keylog_buf;
 
@@ -346,10 +347,12 @@ ngx_ssl_keylogger(const ngx_ssl_conn_t *ssl_conn, const char *line)
         return;
     }
 
+    c = ngx_ssl_get_connection(ssl_conn);
+
     size = len + 1;
 
     if (keylog_buf.len < size) {
-        p = ngx_realloc(keylog_buf.data, size, ssl->log);
+        p = ngx_realloc(keylog_buf.data, size, c->log);
         if (p == NULL) {
             return;
         }
@@ -369,12 +372,12 @@ ngx_ssl_keylogger(const ngx_ssl_conn_t *ssl_conn, const char *line)
 
     if ((size_t) n != size) {
         if (n == -1) {
-            ngx_log_error(NGX_LOG_ALERT, ssl->log, err,
+            ngx_log_error(NGX_LOG_ALERT, c->log, err,
                           ngx_write_fd_n " to \"%V\" failed",
                           &ssl->keylog_file->name);
         } else {
 
-            ngx_log_error(NGX_LOG_ALERT, ssl->log, 0,
+            ngx_log_error(NGX_LOG_ALERT, c->log, 0,
                           ngx_write_fd_n " returned only %z bytes of %uz",
                           n, size);
         }
@@ -4312,6 +4315,9 @@ ngx_ssl_connection_error(ngx_connection_t *c, int sslerr, ngx_err_t err,
 #ifdef SSL_R_PACKET_LENGTH_TOO_LONG
             || n == SSL_R_PACKET_LENGTH_TOO_LONG                     /*  198 */
 #endif
+#ifdef SSL_R_INVALID_ALERT
+            || n == SSL_R_INVALID_ALERT                              /*  205 */
+#endif
             || n == SSL_R_RECORD_LENGTH_MISMATCH                     /*  213 */
 #ifdef SSL_R_TOO_MANY_WARNING_ALERTS
             || n == SSL_R_TOO_MANY_WARNING_ALERTS                    /*  220 */
@@ -4371,9 +4377,14 @@ ngx_ssl_connection_error(ngx_connection_t *c, int sslerr, ngx_err_t err,
 #endif
 #ifdef SSL_R_SSL3_SESSION_ID_TOO_LONG
             || n == SSL_R_SSL3_SESSION_ID_TOO_LONG                   /*  300 */
+#elif (defined SSL_R_TLS_SESSION_ID_TOO_LONG)
+            || n == SSL_R_TLS_SESSION_ID_TOO_LONG                    /*  300 */
 #endif
 #ifdef SSL_R_BAD_ECPOINT
             || n == SSL_R_BAD_ECPOINT                                /*  306 */
+#endif
+#ifdef SSL_R_RECORD_LAYER_FAILURE
+            || n == SSL_R_RECORD_LAYER_FAILURE                       /*  313 */
 #endif
 #ifdef SSL_R_RENEGOTIATE_EXT_TOO_LONG
             || n == SSL_R_RENEGOTIATE_EXT_TOO_LONG                   /*  335 */
@@ -4407,33 +4418,8 @@ ngx_ssl_connection_error(ngx_connection_t *c, int sslerr, ngx_err_t err,
 #ifdef SSL_R_BAD_RECORD_TYPE
             || n == SSL_R_BAD_RECORD_TYPE                            /*  443 */
 #endif
-            || n == 1000 /* SSL_R_SSLV3_ALERT_CLOSE_NOTIFY */
-#ifdef SSL_R_SSLV3_ALERT_UNEXPECTED_MESSAGE
-            || n == SSL_R_SSLV3_ALERT_UNEXPECTED_MESSAGE             /* 1010 */
-            || n == SSL_R_SSLV3_ALERT_BAD_RECORD_MAC                 /* 1020 */
-            || n == SSL_R_TLSV1_ALERT_DECRYPTION_FAILED              /* 1021 */
-            || n == SSL_R_TLSV1_ALERT_RECORD_OVERFLOW                /* 1022 */
-            || n == SSL_R_SSLV3_ALERT_DECOMPRESSION_FAILURE          /* 1030 */
-            || n == SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE              /* 1040 */
-            || n == SSL_R_SSLV3_ALERT_NO_CERTIFICATE                 /* 1041 */
-            || n == SSL_R_SSLV3_ALERT_BAD_CERTIFICATE                /* 1042 */
-            || n == SSL_R_SSLV3_ALERT_UNSUPPORTED_CERTIFICATE        /* 1043 */
-            || n == SSL_R_SSLV3_ALERT_CERTIFICATE_REVOKED            /* 1044 */
-            || n == SSL_R_SSLV3_ALERT_CERTIFICATE_EXPIRED            /* 1045 */
-            || n == SSL_R_SSLV3_ALERT_CERTIFICATE_UNKNOWN            /* 1046 */
-            || n == SSL_R_SSLV3_ALERT_ILLEGAL_PARAMETER              /* 1047 */
-            || n == SSL_R_TLSV1_ALERT_UNKNOWN_CA                     /* 1048 */
-            || n == SSL_R_TLSV1_ALERT_ACCESS_DENIED                  /* 1049 */
-            || n == SSL_R_TLSV1_ALERT_DECODE_ERROR                   /* 1050 */
-            || n == SSL_R_TLSV1_ALERT_DECRYPT_ERROR                  /* 1051 */
-            || n == SSL_R_TLSV1_ALERT_EXPORT_RESTRICTION             /* 1060 */
-            || n == SSL_R_TLSV1_ALERT_PROTOCOL_VERSION               /* 1070 */
-            || n == SSL_R_TLSV1_ALERT_INSUFFICIENT_SECURITY          /* 1071 */
-            || n == SSL_R_TLSV1_ALERT_INTERNAL_ERROR                 /* 1080 */
-            || n == SSL_R_TLSV1_ALERT_USER_CANCELLED                 /* 1090 */
-            || n == SSL_R_TLSV1_ALERT_NO_RENEGOTIATION               /* 1100 */
-#endif
-            || n == 1121 /* SSL_R_TLSV1_ALERT_ECH_REQUIRED */
+            || (n >= SSL_AD_REASON_OFFSET                            /* 1000 */
+                && n <= SSL_AD_REASON_OFFSET + 255)
             )
         {
             switch (c->log_error) {
