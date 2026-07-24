@@ -178,6 +178,8 @@ sub api_status {
 								downtime      => $NUM_RE,
 								fails         => $NUM_RE,
 								unavailable   => $NUM_RE,
+								header_time   => $NUM_RE,
+								response_time => $NUM_RE,
 							}),
 						}),
 					),
@@ -254,9 +256,12 @@ sub api_status {
 						%{ $peer },
 						data   => $data,
 						health => subhashof({
+							connect_time    => $NUM_RE,
 							downstart       => $TIME_RE,
 							downtime        => $NUM_RE,
 							fails           => $NUM_RE,
+							first_byte_time => $NUM_RE,
+							last_byte_time  => $NUM_RE,
 							unavailable     => $NUM_RE,
 						}),
 					}),
@@ -273,8 +278,22 @@ sub api_status {
 sub traverse_api_status {
 	my ($uri, $expected, %extra) = @_;
 
+	my $optional = delete $extra{optional};
+
 	my $api_status = get_json($uri, %extra);
 	debug(explain($api_status));
+
+	# An optional entity may legitimately disappear between the parent's GET
+	# and this one (e.g. an ACME client's "next_run" is absent while the
+	# client is renewing its certificate).
+
+	if ($optional && ref $api_status eq 'HASH'
+		&& defined $api_status->{error}
+		&& $api_status->{error} eq 'PathNotFound')
+	{
+		debug("SKIP $uri (entity vanished)");
+		return 1;
+	}
 
 	my ($ok, $stack) = cmp_details($api_status, $expected);
 	unless ($ok) {
@@ -343,8 +362,11 @@ sub traverse_api_status {
 	return $ok
 		unless ref $api_status eq 'HASH';
 
+	my $optional_children = 0;
+
 	if (ref $expected eq 'Test::Deep::SubHash') {
 		$expected = $expected->{val};
+		$optional_children = 1;
 	}
 
 	foreach my $key (keys %{ $api_status }) {
@@ -364,8 +386,8 @@ sub traverse_api_status {
 			$expected_val = ignore();
 		}
 
-		my ($res, $details)
-			= traverse_api_status("${uri}${key}/", $expected_val, %extra);
+		my ($res, $details) = traverse_api_status("${uri}${key}/",
+			$expected_val, %extra, optional => $optional_children);
 
 		return $res, $details
 			unless $res;

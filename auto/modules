@@ -870,6 +870,17 @@ if [ $HTTP = YES ]; then
         . auto/module
     fi
 
+    if [ $HTTP_DOH = YES ]; then
+        ngx_module_name=ngx_http_doh_module
+        ngx_module_incs=
+        ngx_module_deps=
+        ngx_module_srcs=src/http/modules/ngx_http_doh_module.c
+        ngx_module_libs=
+        ngx_module_link=$HTTP_DOH
+
+        . auto/module
+    fi
+
     if [ $HTTP_EMPTY_GIF = YES ]; then
         ngx_module_name=ngx_http_empty_gif_module
         ngx_module_incs=
@@ -985,6 +996,17 @@ if [ $HTTP = YES ]; then
         ngx_module_srcs=src/http/modules/ngx_http_upstream_least_conn_module.c
         ngx_module_libs=
         ngx_module_link=$HTTP_UPSTREAM_LEAST_CONN
+
+        . auto/module
+    fi
+
+    if [ $HTTP_UPSTREAM_LEAST_TIME = YES ]; then
+        ngx_module_name=ngx_http_upstream_least_time_module
+        ngx_module_incs=
+        ngx_module_deps=
+        ngx_module_srcs=src/http/modules/ngx_http_upstream_least_time_module.c
+        ngx_module_libs=
+        ngx_module_link=$HTTP_UPSTREAM_LEAST_TIME
 
         . auto/module
     fi
@@ -1320,6 +1342,17 @@ if [ $STREAM != NO ]; then
         . auto/module
     fi
 
+    if [ $STREAM_UPSTREAM_LEAST_TIME = YES ]; then
+        ngx_module_name=ngx_stream_upstream_least_time_module
+        ngx_module_incs=
+        ngx_module_deps=
+        ngx_module_srcs=src/stream/ngx_stream_upstream_least_time_module.c
+        ngx_module_libs=
+        ngx_module_link=$STREAM_UPSTREAM_LEAST_TIME
+
+        . auto/module
+    fi
+
     if [ $STREAM_UPSTREAM_RANDOM = YES ]; then
         ngx_module_name=ngx_stream_upstream_random_module
         ngx_module_deps=
@@ -1626,10 +1659,25 @@ if [ $USE_DOCKER = YES ]; then
 fi
 
 
+if [ $HTTP_ACME = YES ]; then
+    ngx_module_type=CORE
+    ngx_module_name=ngx_acme_module
+    ngx_module_incs=
+    ngx_module_deps=src/core/ngx_acme.h
+    ngx_module_srcs=src/core/ngx_acme.c
+    ngx_module_libs=
+    ngx_module_link=YES
+    ngx_module_order=
+
+    . auto/module
+fi
+
+
 if [ $HTTP = YES ] || [ $STREAM != NO ]; then
     if [ $HTTP_UPSTREAM_STICKY = YES ] || [ $STREAM_UPSTREAM_STICKY = YES ]
     then
         CORE_DEPS="$CORE_DEPS src/core/ngx_sticky.h"
+        CORE_SRCS="$CORE_SRCS src/core/ngx_sticky.c"
     fi
 fi
 

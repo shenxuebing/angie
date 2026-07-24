@@ -13,9 +13,15 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ngx_sticky.h>
 
 
+#if (NGX_HTTP_UPSTREAM_STICKY)
+#define NGX_HTTP_UPSTREAM_DRAINING        16
+#define NGX_HTTP_UPSTREAM_SID_LEN   NGX_STICKY_SID_LEN
+#else
 #define NGX_HTTP_UPSTREAM_SID_LEN   32
+#endif
 
 
 #if (NGX_API && NGX_HTTP_UPSTREAM_ZONE)
@@ -79,8 +85,12 @@ struct ngx_http_upstream_rr_peer_s {
 
     ngx_uint_t                      max_fails;
     time_t                          fail_timeout;
+    ngx_msec_t                      response_time;
+    ngx_msec_t                      header_time;
     ngx_msec_t                      slow_start;
     ngx_msec_t                      slow_time;
+
+    double                          average;
 
     ngx_uint_t                      down;
 
@@ -136,6 +146,8 @@ struct ngx_http_upstream_rr_peers_s {
 
     ngx_http_upstream_rr_peer_t    *peer;
 
+    double                          last_average;
+
 #if (NGX_HTTP_UPSTREAM_ZONE)
     ngx_uint_t                     *generation;
     ngx_http_upstream_rr_peer_t    *resolve;
@@ -164,6 +176,8 @@ ngx_int_t ngx_api_http_upstream_peer_struct_int_handler(
     ngx_api_entry_data_t data, ngx_api_ctx_t *actx, void *ctx);
 ngx_int_t ngx_api_http_upstream_peer_struct_int64_handler(
     ngx_api_entry_data_t data, ngx_api_ctx_t *actx, void *ctx);
+ngx_int_t ngx_api_http_upstream_peer_struct_msec_handler(
+    ngx_api_entry_data_t data, ngx_api_ctx_t *actx, void *ctx);
 
 #endif
 
@@ -176,6 +190,9 @@ ngx_int_t ngx_api_http_upstream_peer_struct_int64_handler(
 
 #define ngx_http_upstream_rr_is_busy(peer)                                    \
     (peer->max_conns && peer->conns >= peer->max_conns)
+
+#define ngx_http_upstream_rr_is_adm_down(peer)                                \
+    ((peer)->down & 1)
 
 
 #if (NGX_HTTP_UPSTREAM_ZONE)
@@ -378,7 +395,7 @@ ngx_http_upstream_rr_reset_tried(ngx_http_upstream_rr_peer_data_t *rrp,
 
 
 static ngx_inline ngx_uint_t
-ngx_http_upstream_rr_peer_ready(ngx_http_upstream_rr_peer_data_t *rrp,
+ngx_http_upstream_rr_peer_usable(ngx_http_upstream_rr_peer_data_t *rrp,
     ngx_http_upstream_rr_peer_t *peer, ngx_uint_t index)
 {
     uintptr_t   m;
@@ -391,10 +408,6 @@ ngx_http_upstream_rr_peer_ready(ngx_http_upstream_rr_peer_data_t *rrp,
         return 0;
     }
 
-    if (peer->down) {
-        return 0;
-    }
-
     if (ngx_http_upstream_rr_is_failed(peer)
         && !ngx_http_upstream_rr_is_fail_expired(peer))
     {
@@ -402,6 +415,22 @@ ngx_http_upstream_rr_peer_ready(ngx_http_upstream_rr_peer_data_t *rrp,
     }
 
     if (ngx_http_upstream_rr_is_busy(peer)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+
+static ngx_inline ngx_uint_t
+ngx_http_upstream_rr_peer_ready(ngx_http_upstream_rr_peer_data_t *rrp,
+    ngx_http_upstream_rr_peer_t *peer, ngx_uint_t index)
+{
+    if (!ngx_http_upstream_rr_peer_usable(rrp, peer, index)) {
+        return 0;
+    }
+
+    if (peer->down) {
         return 0;
     }
 

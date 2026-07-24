@@ -1,5 +1,6 @@
 
 /*
+ * Copyright (C) 2026 Web Server LLC
  * Copyright (C) Igor Sysoev
  * Copyright (C) Nginx, Inc.
  */
@@ -17,6 +18,7 @@
 typedef struct {
     u_char                     *ip;
     u_char                     *pos;
+    u_char                     *end;
     ngx_http_variable_value_t  *sp;
 
     ngx_str_t                   buf;
@@ -30,6 +32,7 @@ typedef struct {
     unsigned                    quote:1;
     unsigned                    is_args:1;
     unsigned                    log:1;
+    unsigned                    finalize:1;
 
     ngx_int_t                   status;
     ngx_http_request_t         *request;
@@ -168,6 +171,12 @@ typedef struct {
 } ngx_http_script_return_code_t;
 
 
+typedef struct {
+    ngx_http_script_code_pt     code;
+    ngx_str_t                   name;
+} ngx_http_script_goto_code_t;
+
+
 typedef enum {
     ngx_http_script_file_plain = 0,
     ngx_http_script_file_not_plain,
@@ -197,6 +206,11 @@ typedef struct {
     ngx_http_script_code_pt     code;
     ngx_array_t                *lengths;
 } ngx_http_script_complex_value_code_t;
+
+
+typedef struct {
+    ngx_http_script_code_pt     code;
+} ngx_http_script_complex_value_end_code_t;
 
 
 typedef struct {
@@ -240,6 +254,9 @@ void *ngx_http_script_start_code(ngx_pool_t *pool, ngx_array_t **codes,
     size_t size);
 void *ngx_http_script_add_code(ngx_array_t *codes, size_t size, void *code);
 
+ngx_int_t ngx_http_script_check_length(ngx_http_script_engine_t *e,
+    size_t len);
+
 size_t ngx_http_script_copy_len_code(ngx_http_script_engine_t *e);
 void ngx_http_script_copy_code(ngx_http_script_engine_t *e);
 size_t ngx_http_script_copy_var_len_code(ngx_http_script_engine_t *e);
@@ -253,12 +270,14 @@ void ngx_http_script_regex_start_code(ngx_http_script_engine_t *e);
 void ngx_http_script_regex_end_code(ngx_http_script_engine_t *e);
 #endif
 void ngx_http_script_return_code(ngx_http_script_engine_t *e);
+void ngx_http_script_goto_code(ngx_http_script_engine_t *e);
 void ngx_http_script_break_code(ngx_http_script_engine_t *e);
 void ngx_http_script_if_code(ngx_http_script_engine_t *e);
 void ngx_http_script_equal_code(ngx_http_script_engine_t *e);
 void ngx_http_script_not_equal_code(ngx_http_script_engine_t *e);
 void ngx_http_script_file_code(ngx_http_script_engine_t *e);
 void ngx_http_script_complex_value_code(ngx_http_script_engine_t *e);
+void ngx_http_script_complex_value_end_code(ngx_http_script_engine_t *e);
 void ngx_http_script_value_code(ngx_http_script_engine_t *e);
 void ngx_http_script_set_var_code(ngx_http_script_engine_t *e);
 void ngx_http_script_var_set_handler_code(ngx_http_script_engine_t *e);

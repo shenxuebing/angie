@@ -106,16 +106,16 @@ $t->write_file('index.html', 'SUCCESS');
 $t->write_file('50x.html', 'ERROR');
 
 $t->run_daemon(\&dns_daemon, $t);
-$t->waitforfile($t->testdir . '/' . port(8987))
-	or die "dns daemon failed to start\n";
+eval { $t->waitforfile($t->testdir . '/' . port(8987)); };
+die "dns daemon failed to start: $@\n" if $@;
 
 $t->run_daemon(\&http_daemon, port(8086));
-$t->waitforsocket('127.0.0.1:' . port(8086))
-	or die 'http daemon failed to start at 127.0.0.1:' . port(8086). "\n";
+eval { $t->waitforsocket('127.0.0.1:' . port(8086)); };
+die 'http daemon failed to start at 127.0.0.1:' . port(8086). ": $@\n" if $@;
 
 $t->run_daemon(\&http_daemon, port(8087), response_delay => 2);
-$t->waitforsocket('127.0.0.1:' . port(8087))
-	or die 'http daemon failed to start at 127.0.0.1:' . port(8087). "\n";
+eval { $t->waitforsocket('127.0.0.1:' . port(8087)); };
+die 'http daemon failed to start at 127.0.0.1:' . port(8087). ": $@\n" if $@;
 
 $t->plan(8)->run();
 
@@ -142,9 +142,9 @@ like(proxy_get("/", "uto.example.net:$p", port(8085)), qr/504 Gateway Timeout/,
 
 if ($^O eq 'freebsd') {
 	$t->skip_errors_check('crit',
-		"Can't assign requested address.+request: "
+		"Can't assign requested address.+request_line: "
 			. "\"CONNECT nxt.example.net:$p HTTP/1.1\"",
-		"Can't assign requested address.+request: "
+		"Can't assign requested address.+request_line: "
 			. "\"CONNECT try.example.net:$p HTTP/1.1\""
 	);
 }

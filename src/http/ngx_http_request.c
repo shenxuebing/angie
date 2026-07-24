@@ -524,10 +524,13 @@ ngx_http_init_connection(ngx_connection_t *c)
 
     c->log->connection = c->number;
     c->log->handler = ngx_http_log_error;
+    c->log->handler_name = ngx_http_log_prop(HTTP);
     c->log->data = ctx;
     c->log->action = "waiting for request";
 
     c->log_error = NGX_ERROR_INFO;
+
+    ngx_log_add_tag(c->log, ngx_http_log_tag(HTTP_TAG));
 
     rev = c->read;
     rev->handler = ngx_http_wait_request_handler;
@@ -2901,6 +2904,14 @@ ngx_http_post_request(ngx_http_request_t *r, ngx_http_posted_request_t *pr)
 {
     ngx_http_posted_request_t  **p;
 
+    for (p = &r->main->posted_requests; *p; p = &(*p)->next) {
+        if ((*p)->request == r) {
+            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "http request already posted");
+            return NGX_OK;
+        }
+    }
+
     if (pr == NULL) {
         pr = ngx_palloc(r->pool, sizeof(ngx_http_posted_request_t));
         if (pr == NULL) {
@@ -2910,8 +2921,6 @@ ngx_http_post_request(ngx_http_request_t *r, ngx_http_posted_request_t *pr)
 
     pr->request = r;
     pr->next = NULL;
-
-    for (p = &r->main->posted_requests; *p; p = &(*p)->next) { /* void */ }
 
     *p = pr;
 
@@ -3044,6 +3053,8 @@ ngx_http_finalize_request(ngx_http_request_t *r, ngx_int_t rc)
             }
 
             r->main->count--;
+
+            r->write_event_handler = ngx_http_request_empty_handler;
 
             if (pr->postponed && pr->postponed->request == r) {
                 pr->postponed = pr->postponed->next;
@@ -3800,10 +3811,9 @@ ngx_http_keepalive_handler(ngx_event_t *rev)
 
     if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
         if (rev->pending_eof) {
-            c->log->handler = NULL;
             ngx_log_error(NGX_LOG_INFO, c->log, rev->kq_errno,
-                          "kevent() reported that client %V closed "
-                          "keepalive connection", &c->addr_text);
+                          "kevent() reported that client closed "
+                          "keepalive connection");
 #if (NGX_HTTP_SSL)
             if (c->ssl) {
                 c->ssl->no_send_shutdown = 1;
@@ -3877,18 +3887,18 @@ ngx_http_keepalive_handler(ngx_event_t *rev)
         return;
     }
 
-    c->log->handler = NULL;
+    c->log->handler = ngx_http_log_error;
+    c->log->handler_name = ngx_http_log_prop(HTTP);
 
     if (n == 0) {
         ngx_log_error(NGX_LOG_INFO, c->log, ngx_socket_errno,
-                      "client %V closed keepalive connection", &c->addr_text);
+                      "client closed connection");
         ngx_http_close_connection(c);
         return;
     }
 
     b->last += n;
 
-    c->log->handler = ngx_http_log_error;
     c->log->action = "reading client request line";
 
     c->idle = 0;
@@ -4335,7 +4345,7 @@ ngx_http_log_error(ngx_log_t *log, u_char *buf, size_t len)
     p = buf;
     last = buf + len;
 
-    ngx_log_add_tag(log, "http");
+    ngx_log_add_tag(log, ngx_http_log_tag(HTTP_TAG));
 
     if (log->action) {
         p = ngx_log_action(log, p, last, log->action);
@@ -4393,7 +4403,13 @@ ngx_http_log_error_handler(ngx_log_t *log, u_char *buf, u_char *last,
                 return buf;
             }
 
-            ngx_log_add_str_tag(log, &utag);
+            if (utag.len == 0) {
+                continue;
+            }
+
+            if (ngx_log_add_user_tag(log, &utag, r->pool) != NGX_OK) {
+                return buf;
+            }
         }
     }
 
@@ -4412,12 +4428,12 @@ ngx_http_log_error_handler(ngx_log_t *log, u_char *buf, u_char *last,
     }
 
     if (r->request_line.len) {
-        p = ngx_log_property(log, p, last, ngx_http_log_prop(REQUEST), "%V",
-                             &r->request_line);
+        p = ngx_log_property(log, p, last, ngx_http_log_prop(REQUEST_LINE),
+                             "%V", &r->request_line);
     }
 
     if (r != sr) {
-        ngx_log_add_tag(log, "subrequest");
+        ngx_log_add_tag(log, ngx_http_log_tag(SUBREQUEST));
         p = ngx_log_property(log, p, last, ngx_http_log_prop(SUBREQUEST), "%V",
                              &sr->uri);
     }
@@ -4425,12 +4441,12 @@ ngx_http_log_error_handler(ngx_log_t *log, u_char *buf, u_char *last,
     u = sr->upstream;
 
     if (u) {
-        ngx_log_add_tag(log, "upstream");
+        ngx_log_add_tag(log, ngx_http_log_tag(UPSTREAM));
     }
 
     if (u && u->peer.name) {
 
-        ngx_log_add_tag(log, "peer");
+        ngx_log_add_tag(log, ngx_http_log_tag(PEER_TAG));
 
         uri_separator = "";
 
@@ -4635,13 +4651,9 @@ ngx_api_status_zone_iterate(ngx_api_ctx_t *actx, ngx_http_stats_zone_t *zones,
     for (zone = zones; zone; zone = zone->next) {
         ictx.elts = zone;
 
-        ngx_rwlock_rlock(&zone->sh->lock);
-
         zone->current_node = zone->sh->first_node;
 
         rc = ngx_api_object_iterate(ngx_api_http_zones_iter, &ictx, actx);
-
-        ngx_rwlock_unlock(&zone->sh->lock);
 
         /* single zone */
         if (path.len != 0) {
@@ -4870,6 +4882,22 @@ ngx_http_get_stats_zone(ngx_http_request_t *r,
 
     hash = ngx_crc32_short(key.data, key.len);
 
+    if (zone->sh->stats_count >= zone->count) {
+        node = ngx_http_stats_zone_lookup(&zone->sh->rbtree, &key, hash);
+        return node == NULL ? zone->sh->first_node
+                            : (ngx_http_stats_zone_node_t *) &node->color;
+    }
+
+    ngx_rwlock_rlock(&zone->sh->lock);
+
+    node = ngx_http_stats_zone_lookup(&zone->sh->rbtree, &key, hash);
+
+    ngx_rwlock_unlock(&zone->sh->lock);
+
+    if (node != NULL) {
+        return (ngx_http_stats_zone_node_t *) &node->color;
+    }
+
     ngx_rwlock_wlock(&zone->sh->lock);
 
     node = ngx_http_stats_zone_lookup(&zone->sh->rbtree, &key, hash);
@@ -4893,6 +4921,8 @@ ngx_http_get_stats_zone(ngx_http_request_t *r,
 #if (NGX_HTTP_SSL)
         stats_zone->ssl = status_zone->ssl;
 #endif
+
+        ngx_memory_barrier();
 
         zone->sh->last_node->next = stats_zone;
         zone->sh->last_node = stats_zone;

@@ -301,9 +301,6 @@ void *ngx_ssl_cache_connection_fetch(ngx_ssl_cache_t *cache, ngx_pool_t *pool,
 #if (NGX_API)
 void *ngx_ssl_cache_static_peek(ngx_pool_t *pool, ngx_uint_t index,
     ngx_str_t *path);
-#if (NGX_STREAM_SSL)
-ngx_int_t ngx_api_stream_add_certs(ngx_api_ctx_t *actx, void *ctx);
-#endif
 #endif
 
 ngx_array_t *ngx_ssl_read_password_file(ngx_conf_t *cf, ngx_str_t *file);
@@ -370,6 +367,8 @@ ngx_int_t ngx_ssl_get_curve(ngx_connection_t *c, ngx_pool_t *pool,
 ngx_int_t ngx_ssl_get_curves(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
 ngx_int_t ngx_ssl_get_sigalg(ngx_connection_t *c, ngx_pool_t *pool,
+    ngx_str_t *s);
+ngx_int_t ngx_ssl_get_sigalgs(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);
 ngx_int_t ngx_ssl_get_session_id(ngx_connection_t *c, ngx_pool_t *pool,
     ngx_str_t *s);

@@ -38,6 +38,12 @@ static void *ngx_stream_upstream_create_main_conf(ngx_conf_t *cf);
 static char *ngx_stream_upstream_init_main_conf(ngx_conf_t *cf, void *conf);
 
 
+static ngx_conf_num_bounds_t  ngx_stream_upstream_response_time_factor_bounds =
+{
+    ngx_conf_check_num_bounds, 0, 99
+};
+
+
 static ngx_command_t  ngx_stream_upstream_commands[] = {
 
     { ngx_string("upstream"),
@@ -71,6 +77,13 @@ static ngx_command_t  ngx_stream_upstream_commands[] = {
       NULL },
 
 #endif
+
+    { ngx_string("response_time_factor"),
+      NGX_STREAM_UPS_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_STREAM_SRV_CONF_OFFSET,
+      offsetof(ngx_stream_upstream_srv_conf_t, rt_factor),
+      &ngx_stream_upstream_response_time_factor_bounds },
 
       ngx_null_command
 };
@@ -637,10 +650,33 @@ ngx_stream_upstream_server(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 goto not_supported;
             }
 
+#if (NGX_STREAM_UPSTREAM_STICKY)
+            if (us->down == NGX_STREAM_UPSTREAM_DRAINING) {
+                goto down_and_drain;
+            }
+#endif
+
             us->down = 1;
 
             continue;
         }
+
+#if (NGX_STREAM_UPSTREAM_STICKY)
+        if (ngx_strcmp(value[i].data, "drain") == 0) {
+
+            if (!(uscf->flags & NGX_STREAM_UPSTREAM_DOWN)) {
+                goto not_supported;
+            }
+
+            if (us->down == 1) {
+                goto down_and_drain;
+            }
+
+            us->down = NGX_STREAM_UPSTREAM_DRAINING;
+
+            continue;
+        }
+#endif
 
         if (ngx_strncmp(value[i].data, "slow_start=", 11) == 0) {
 
@@ -695,7 +731,8 @@ ngx_stream_upstream_server(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             }
 
             if (value[i].len == 0) {
-                goto invalid;
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "sid is empty");
+                return NGX_CONF_ERROR;
             }
 
             sid.len = value[i].len;
@@ -840,6 +877,18 @@ not_supported:
                        &value[i]);
 
     return NGX_CONF_ERROR;
+
+#if (NGX_STREAM_UPSTREAM_STICKY)
+
+down_and_drain:
+
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                       "incompatible parameters \"down\" and \"drain\"");
+
+    return NGX_CONF_ERROR;
+
+#endif
+
 }
 
 
@@ -947,6 +996,7 @@ ngx_stream_upstream_add(ngx_conf_t *cf, ngx_url_t *u, ngx_uint_t flags)
     uscf->line = cf->conf_file->line;
     uscf->port = u->port;
     uscf->no_port = u->no_port;
+    uscf->rt_factor = NGX_CONF_UNSET_UINT;
 #if (NGX_STREAM_UPSTREAM_ZONE)
     uscf->resolver_timeout = NGX_CONF_UNSET_MSEC;
 #endif

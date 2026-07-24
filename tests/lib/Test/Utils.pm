@@ -12,9 +12,10 @@ use strict;
 use Exporter qw/import/;
 BEGIN {
 	our @EXPORT_OK = qw/ get_json put_json delete_json patch_json annotate
-		getconn hash_like stream_daemon trim log2i log2o log2c
-		$TIME_RE $NUM_RE $POSITIVE_NUM is_positive_num get_caller wait_for
-		get_primary_user_group /;
+		getconn hash_like stream_daemon
+		socket_read trim log2i log2o log2c
+		$TIME_RE $NUM_RE $POSITIVE_NUM is_positive_num get_caller
+		wait_for get_primary_user_group /;
 
 	our %EXPORT_TAGS = (
 		json => [ qw/ get_json put_json delete_json patch_json / ],
@@ -34,7 +35,8 @@ use Test::Nginx qw/ http http_get log_in log_out port /;
 eval { require JSON; };
 plan(skip_all => "JSON is not installed") if $@;
 
-our $TIME_RE = re(qr/^\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}(\.\d{3})?Z$/);
+# ISO8601: "1970-01-01T00:00:00.000Z", .000 is optional
+our $TIME_RE = re(qr/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/);
 our $NUM_RE  = re(qr/^\d+$/);
 our $POSITIVE_NUM = code(\&is_positive_num);
 
@@ -325,22 +327,27 @@ sub wait_for {
 	my ($condition, $info, $delay) = @_;
 
 	my $sec = $delay // 20;
-	my $ms = 0;
+	my $s = 0;
 
+	my $ok = 0;
 	for (1 .. ($sec * 10)) {
 		if ($condition->()) {
-			note("Condition '$info' met in $ms ms\n");
-			return 1;
+			$ok = 1;
+			last;
 		}
 
-		$ms += 0.1;
+		$s += 0.1;
 		select undef, undef, undef, 0.1;
 	}
 
-	my $c = get_caller();
-	diag("Timeout waiting for '$info' after $sec seconds ($c)");
+	unless ($ok) {
+		my $c = get_caller();
+		diag("Timeout waiting for '$info' after $sec seconds ($c)");
+	}
 
-	return;
+	ok($ok, "Condition '$info' met in $s s");
+
+	return $ok;
 }
 
 sub get_primary_user_group {

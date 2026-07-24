@@ -59,11 +59,16 @@ sub new {
 	my $tname = (caller(0))[1];
 	my $basename = basename($tname, '.t');
 
-	$self->{_testdir} = tempdir(
-		"angie-test-$basename-XXXXXXXXXX",
-		TMPDIR => 1
-	)
-		or die "Can't create temp directory: $!\n";
+	if ($ENV{TEST_ANGIE_TMPDIR}) {
+		$self->{_testdir} = $ENV{TEST_ANGIE_TMPDIR};
+
+	} else {
+		$self->{_testdir} = tempdir(
+			"angie-test-$basename-XXXXXXXXXX",
+			TMPDIR => 1
+		)
+			or die "Can't create temp directory: $!\n";
+	}
 
 	Test::More::BAIL_OUT("no $NGINX binary found")
 		unless -x $NGINX;
@@ -81,7 +86,9 @@ sub DESTROY {
 	$self->stop_daemons();
 	$self->stop_resolver();
 
-	if (Test::More->builder->expected_tests) {
+	my $do_log_check = Test::More->builder->expected_tests;
+
+	if ($do_log_check) {
 		foreach my $level (qw(alert crit emerg)) {
 			my $errors_re = join('|',
 				@{ $self->{_errors_to_skip}{$level} // [] });
@@ -111,13 +118,13 @@ sub DESTROY {
 		}
 	}
 
-	if (Test::More->builder->expected_tests) {
+	if ($do_log_check) {
 		my $errors = join "\n",
 			$self->find_in_file('error.log', qr/.+Sanitizer.+/);
 		Test::More::is($errors, '', 'no sanitizer errors');
 	}
 
-	if (Test::More->builder->expected_tests && $ENV{TEST_ANGIE_VALGRIND}) {
+	if ($do_log_check && $ENV{TEST_ANGIE_VALGRIND}) {
 		my $errors = $self->grep_file('valgrind.log', qr/^==\d+== .+/m);
 		Test::More::is($errors, '', 'no valgrind errors');
 	}
@@ -199,6 +206,7 @@ sub has_module($) {
 		grpc	=> '(?s)^(?!.*--without-http_grpc_module)',
 		memcached
 			=> '(?s)^(?!.*--without-http_memcached_module)',
+		doh	=> '(?s)^(?!.*--without-http_doh_module)',
 		limit_conn
 			=> '(?s)^(?!.*--without-http_limit_conn_module)',
 		limit_req
@@ -212,6 +220,8 @@ sub has_module($) {
 			=> '(?s)^(?!.*--without-http_upstream_ip_hash_module)',
 		upstream_least_conn
 			=> '(?s)^(?!.*--without-http_upstream_least_conn_mod)',
+		upstream_least_time
+			=> '(?s)^(?!.*--without-http_upstream_least_time_mod)',
 		upstream_random
 			=> '(?s)^(?!.*--without-http_upstream_random_module)',
 		upstream_keepalive
@@ -263,6 +273,8 @@ sub has_module($) {
 			=> '(?s)^(?!.*--without-stream_upstream_hash_module)',
 		stream_upstream_least_conn
 			=> '(?s)^(?!.*--without-stream_upstream_least_conn_m)',
+		stream_upstream_least_time
+			=> '(?s)^(?!.*--without-stream_upstream_least_time_m)',
 		stream_upstream_random
 			=> '(?s)^(?!.*--without-stream_upstream_random_modul)',
 		stream_upstream_zone
@@ -414,8 +426,8 @@ sub try_run {
 	eval {
 		open OLDERR, ">&", \*STDERR; close STDERR;
 		$self->run();
-		open STDERR, ">&", \*OLDERR;
 	};
+	open STDERR, ">&", \*OLDERR;
 
 	return $self unless $@;
 
@@ -434,9 +446,7 @@ sub try_run {
 		}
 	}
 
-	Test::More::diag($@);
-
-	die;
+	die $@;
 }
 
 sub retry_run($$) {
@@ -449,11 +459,14 @@ sub retry_run($$) {
 			open STDERR, ">&", \*OLDERR;
 		};
 
-		$k = $k + 1;
+		unless ($@) {
+			undef $self->{_setup_failed};
+			return $self;
+		}
 
-		return $self unless $@;
-		print("# attempt to run #$k/$attempts failed\n");
+		Test::More::diag("attempt to run #$k/$attempts failed");
 	}
+
 	return 0;
 }
 
@@ -520,14 +533,15 @@ sub run(;$) {
 
 	# wait for nginx to start
 
-	my $nginx_started = $self->waitforfile("$testdir/nginx.pid", $pid);
-	unless ($nginx_started) {
+	my $nginx_started = eval {
+		$self->waitforfile("$testdir/nginx.pid", $pid);
+	};
+	if (!$nginx_started || $@) {
 
 		# try to kill pid to prevent tests from hanging
-		stop_pid($pid, 1)
-			unless defined $nginx_started;
+		stop_pid($pid, 1);
 
-		die "Can't start nginx";
+		die "Can't start nginx" . (($@) ? ": $@" : '');
 	}
 
 	$self->{_started} = 1;
@@ -538,7 +552,11 @@ sub port {
 	my ($num, %opts) = @_;
 	my ($sock, $lock, $port);
 
-	goto done if defined $ports{$num};
+	if (defined $ports{$num}) {
+		die "port($num) was not initialized with 'dual' option"
+			if $opts{dual} && !exists $ports{$num}{tcp_socket};
+		goto done;
+	}
 
 	my $socket = sub {
 		IO::Socket::INET->new(
@@ -574,7 +592,14 @@ sub port {
 		socket => $lock
 	};
 
+	if ($opts{dual}) {
+		$ports{$num}{udp_socket} = $lock,
+		$ports{$num}{tcp_socket} = $sock,
+	}
+
 done:
+	return ($ports{$num}{tcp_socket}, $ports{$num}{udp_socket})
+		if $opts{dual};
 	return $ports{$num}{socket} if $opts{socket};
 	return $ports{$num}{port};
 }
@@ -629,27 +654,32 @@ sub waitforfile($;$) {
 
 	for (1 .. ($sec * 10)) {
 		return 1 if -e $file;
-		return 0 if $exited;
+
+		if ($exited) {
+			$self->{_setup_failed} = 1;
+			return 0;
+		}
+
 		$exited = waitpid($pid, WNOHANG) != 0 if $pid;
 		select undef, undef, undef, 0.1;
 	}
 
 	my $c = get_caller();
-	Test::More::diag("$file was not created after $sec seconds ($c)");
-
-	return undef;
+	$self->{_setup_failed} = 1;
+	die "$file was not created after $sec seconds ($c)";
 }
 
 sub waitforsocket($) {
-	my ($self, $peer) = @_;
+	my ($self, $peer, $proto) = @_;
 
+	$proto //= 'tcp';
 	my $sec = 5;
 
 	# wait for socket to accept connections
 
 	for (1 .. ($sec * 10)) {
 		my $s = IO::Socket::INET->new(
-			Proto => 'tcp',
+			Proto    => $proto,
 			PeerAddr => $peer,
 		);
 
@@ -659,9 +689,8 @@ sub waitforsocket($) {
 	}
 
 	my $c = get_caller();
-	Test::More::diag("socket was not created after $sec seconds ($c)");
-
-	return undef;
+	$self->{_setup_failed} = 1;
+	die "$proto socket on $peer was not created after $sec seconds ($c)";
 }
 
 sub waitforsslsocket($) {
@@ -684,9 +713,8 @@ sub waitforsslsocket($) {
 	}
 
 	my $c = get_caller();
-	Test::More::diag("SSL socket was not created after $sec seconds ($c)");
-
-	return undef;
+	$self->{_setup_failed} = 1;
+	die "SSL socket on $peer was not created after $sec seconds ($c)";
 }
 
 sub start_resolver {
@@ -743,8 +771,11 @@ EOF
 		'127.0.0.1');
 
 	# wait for pid file to appear
-	$self->waitforfile("$d/dnsmasq.pid", $resolver_pid)
-		or die "Can't start dnsmasq on port $port";
+	my $resolver_started = eval {
+		$self->waitforfile("$d/dnsmasq.pid", $resolver_pid);
+	};
+	die "Can't start dnsmasq on port $port" . (($@) ? ": $@" : '')
+		if !$resolver_started || $@;
 }
 
 sub stop_resolver {
@@ -762,7 +793,7 @@ sub stop_resolver {
 
 	stop_pid($pid, 1);
 
-	my $is_running = `ps $pid | tail +2 | grep -v defunct | wc -l`;
+	my $is_running = `ps $pid | tail -n +2 | grep -v defunct | wc -l`;
 	$is_running =~ s/^\s+|\s+$//g;
 
 	if ($is_running) {
@@ -948,6 +979,18 @@ sub write_file_expand($$) {
 	my ($self, $name, $content) = @_;
 
 	$content =~ s/%%TEST_GLOBALS%%/$self->test_globals()/gmse;
+
+	# evaluate possible value of the corresponding environment variable
+	my $events = $self->test_globals_events();
+
+	# try to replace it in file
+	my $count = ($content =~ s/%%TEST_GLOBALS_EVENTS%%/$events/gmse);
+
+	if (!$count && $events ne '') {
+		# there were no matches in file - auto-insert if variable is set
+		$content =~ s/events \{/events \{\n    $events/;
+	}
+
 	$content =~ s/%%TEST_GLOBALS_HTTP%%/$self->test_globals_http()/gmse;
 	$content =~ s/%%TEST_GLOBALS_STREAM%%/$self->test_globals_stream()/gmse;
 	$content =~ s/%%TESTDIR%%/$self->{_testdir}/gms;
@@ -1055,6 +1098,21 @@ sub test_globals() {
 	$s .= $self->test_globals_perl5lib() if $s !~ /env PERL5LIB/;
 
 	$self->{_test_globals} = $s;
+}
+
+
+sub test_globals_events() {
+	my ($self) = @_;
+
+	return $self->{_test_globals_events}
+		if defined $self->{_test_globals_events};
+
+	my $s = '';
+
+	$s .= $ENV{TEST_ANGIE_GLOBALS_EVENTS}
+		if $ENV{TEST_ANGIE_GLOBALS_EVENTS};
+
+	$self->{_test_globals_events} = $s;
 }
 
 sub test_globals_modules() {
@@ -1629,6 +1687,24 @@ sub run_tests {
 	return $self;
 }
 
+sub prepare_config {
+	my ($self, $test_cases) = @_;
+
+	my $config = $self->{config} // Test::Nginx::Config->new();
+
+	while (my ($test_case_name, $test_case_params) = each %{$test_cases}) {
+		next
+			if defined $ENV{TEST_ANGIE_TC}
+				&& $ENV{TEST_ANGIE_TC} ne $test_case_name;
+
+		$config->add(delete $test_case_params->{config});
+	}
+
+	$self->{config} = $config;
+
+	return $self;
+}
+
 sub test_api {
 	my $self = shift;
 
@@ -1646,6 +1722,10 @@ sub test_api {
 
 		unless ($self->{_started}) {
 			Test::More::skip 'API (the server is already stopped)', 1;
+		}
+
+		if ($self->{_setup_failed}) {
+			Test::More::skip 'API (setup failed)', 1;
 		}
 
 		my $unix_socket_params = {
