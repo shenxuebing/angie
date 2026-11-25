@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 
+# (C) 2026 Web Server LLC
 # (C) Sergey Kandaurov
 # (C) Nginx, Inc.
 
@@ -25,7 +26,8 @@ select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
 my $t = Test::Nginx->new()->has(qw/http http_v2 http_v3 cryptx grpc/)
-	->has_daemon('openssl');
+	->has_daemon('openssl')
+	->plan(14);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -85,7 +87,7 @@ foreach my $name ('localhost') {
 		or die "Can't create certificate for $name: $!\n";
 }
 
-$t->try_run('no early_hints')->plan(14);
+$t->run();
 
 ###############################################################################
 
@@ -238,7 +240,7 @@ EOF
 }
 
 sub h2_grpc {
-	my ($server, $client, $f, $s, $c, $sid);
+	my ($server, $client, $f, $s, $c, $sid, $csid);
 	my $n = 0;
 
 	$server = IO::Socket::INET->new(
@@ -253,7 +255,7 @@ sub h2_grpc {
 	$f->{http_start} = sub {
 		my ($uri, %extra) = @_;
 		$s = Test::Nginx::HTTP2->new();
-		my $csid = $s->new_stream({ body_more => 1, headers => [
+		$csid = $s->new_stream({ body_more => 1, headers => [
 			{ name => ':method', value => 'POST', mode => 0 },
 			{ name => ':scheme', value => 'http', mode => 0 },
 			{ name => ':path', value => $uri, },
@@ -313,7 +315,7 @@ sub h2_grpc {
 			{ name => 'grpc-message', value => '', mode => 2 },
 		]}, $sid);
 
-		return $s->read(all => [{ fin => 1 }]);
+		return $s->read(all => [{ sid => $csid, fin => 1 }]);
 	};
 	return $f;
 }
@@ -387,7 +389,7 @@ sub h3_grpc {
 			{ name => 'grpc-message', value => '', mode => 2 },
 		]}, $sid);
 
-		return $s->read(all => [{ fin => 1 }]);
+		return $s->read(all => [{ sid => $csid, fin => 1 }]);
 	};
 	return $f;
 }

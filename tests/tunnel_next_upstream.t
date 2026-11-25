@@ -37,14 +37,25 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     upstream err.example.net {
-        server 127.0.0.1:8092;
+        # A non-existent unix socket: connect() fails right away with
+        # ENOENT, with no connect timer armed, so the error cannot race
+        # a timeout; and a socket path in the test directory cannot be
+        # taken by another process, unlike a bare TCP port.
+        server unix:%%TESTDIR%%/no-such.sock;
         server 127.0.0.1:8086;
     }
 
     resolver 127.0.0.1:%%PORT_8987_UDP%%;
-    resolver_timeout 1s;
 
-    tunnel_read_timeout 1s;
+    # the interesting properties here are the outcomes: which upstream is
+    # eventually used and which error is returned.  The timeouts below are
+    # only triggers, so keep their margins wide enough for a loaded
+    # machine: a stalled response must stay stalled well past the read
+    # timeout, and name resolution must not race the resolver timeout.
+
+    resolver_timeout 3s;
+
+    tunnel_read_timeout 3s;
     tunnel_connect_timeout 1s;
 
     server {
@@ -76,6 +87,11 @@ http {
 
         tunnel_pass err.example.net;
         tunnel_next_upstream error;
+
+        # the first upstream fails immediately and the second answers at
+        # once, so no timeout needs to fire here; keep generous margins
+        tunnel_connect_timeout 30s;
+        tunnel_read_timeout 30s;
     }
 
     server {
@@ -108,7 +124,10 @@ $t->run_daemon(\&http_daemon, port(8086));
 eval { $t->waitforsocket('127.0.0.1:' . port(8086)); };
 die 'http daemon failed to start at 127.0.0.1:' . port(8086). ": $@\n" if $@;
 
-$t->run_daemon(\&http_daemon, port(8087), response_delay => 2);
+# the response of this daemon is stalled well past tunnel_read_timeout
+# above: the read timeout only has to fire somewhere in between the two
+# writes, and the wider the gap the more machine load it tolerates
+$t->run_daemon(\&http_daemon, port(8087), response_delay => 20);
 eval { $t->waitforsocket('127.0.0.1:' . port(8087)); };
 die 'http daemon failed to start at 127.0.0.1:' . port(8087). ": $@\n" if $@;
 

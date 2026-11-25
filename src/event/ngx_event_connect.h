@@ -68,6 +68,7 @@ struct ngx_peer_connection_s {
 
     int                              type;
     int                              rcvbuf;
+    int                              sndbuf;
 
     ngx_log_t                       *log;
 
@@ -75,6 +76,8 @@ struct ngx_peer_connection_s {
     unsigned                         transparent:1;
     unsigned                         so_keepalive:1;
     unsigned                         down:1;
+    unsigned                         connected:1;
+    unsigned                         closed:1;
 
                                      /* ngx_connection_log_error_e */
     unsigned                         log_error:2;

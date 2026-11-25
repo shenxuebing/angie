@@ -131,8 +131,9 @@ ngx_quic_connstate_dbg(ngx_connection_t *c)
 ngx_int_t
 ngx_quic_apply_transport_params(ngx_connection_t *c, ngx_quic_tp_t *peer_tp)
 {
-    ngx_str_t               scid;
-    ngx_quic_connection_t  *qc;
+    ngx_str_t                scid;
+    ngx_quic_connection_t   *qc;
+    ngx_quic_stream_peer_t  *self;
 
     qc = ngx_quic_get_connection(c);
 
@@ -194,8 +195,10 @@ ngx_quic_apply_transport_params(ngx_connection_t *c, ngx_quic_tp_t *peer_tp)
         qc->tp.max_idle_timeout = peer_tp->max_idle_timeout;
     }
 
-    qc->streams.server.bidi.max = peer_tp->initial_max_streams_bidi;
-    qc->streams.server.uni.max = peer_tp->initial_max_streams_uni;
+    self = qc->client ? &qc->streams.client : &qc->streams.server;
+
+    self->bidi.max = peer_tp->initial_max_streams_bidi;
+    self->uni.max = peer_tp->initial_max_streams_uni;
 
     if (qc->client) {
         ngx_memcpy(qc->path->cid->sr_token,
@@ -522,10 +525,11 @@ static ngx_quic_connection_t *
 ngx_quic_new_connection(ngx_connection_t *c, ngx_quic_conf_t *conf,
     ngx_quic_header_t *pkt)
 {
-    ngx_str_t               dcid;
-    ngx_uint_t              i;
-    ngx_quic_tp_t          *peer_tp;
-    ngx_quic_connection_t  *qc;
+    ngx_str_t                dcid;
+    ngx_uint_t               i;
+    ngx_quic_tp_t           *peer_tp;
+    ngx_quic_connection_t   *qc;
+    ngx_quic_stream_peer_t  *peer;
 
     qc = ngx_pcalloc(c->pool, sizeof(ngx_quic_connection_t));
     if (qc == NULL) {
@@ -606,8 +610,16 @@ ngx_quic_new_connection(ngx_connection_t *c, ngx_quic_conf_t *conf,
     qc->streams.recv_max_data = qc->tp.initial_max_data;
     qc->streams.recv_window = qc->streams.recv_max_data;
 
-    qc->streams.client.uni.max = qc->tp.initial_max_streams_uni;
-    qc->streams.client.bidi.max = qc->tp.initial_max_streams_bidi;
+    peer = qc->client ? &qc->streams.server : &qc->streams.client;
+
+    peer->uni.max = qc->tp.initial_max_streams_uni;
+    peer->bidi.max = qc->tp.initial_max_streams_bidi;
+
+    if (qc->client) {
+        /* client needs this in advance to open streams early */
+        qc->streams.client.uni.max = qc->tp.initial_max_streams_uni;
+        qc->streams.client.bidi.max = qc->tp.initial_max_streams_bidi;
+    }
 
     ngx_quic_congestion_reset(qc);
 
@@ -1161,11 +1173,29 @@ ngx_quic_shutdown_connection(ngx_connection_t *c, ngx_uint_t err,
 static void
 ngx_quic_close_handler(ngx_event_t *ev)
 {
-    ngx_connection_t  *c;
+    ngx_connection_t       *c;
+#if (NGX_API)
+    ngx_quic_connection_t  *qc;
+#endif
 
     ngx_log_debug0(NGX_LOG_DEBUG_EVENT, ev->log, 0, "quic close handler");
 
     c = ev->data;
+
+#if (NGX_API)
+    qc = ngx_quic_get_connection(c);
+
+    /*
+     * account for failed SSL handshake due to timeout;
+     * the ngx_quic_handshake is not called in this case
+     */
+    if (ev->timedout && qc && !qc->closing && c->ssl && !c->ssl->handshaked
+        && !qc->post_hs_done && qc->conf->post_ssl_handshake)
+    {
+        (void) qc->conf->post_ssl_handshake(c, qc->streams.initialized, 1);
+        qc->post_hs_done = 1;
+    }
+#endif
 
     ngx_quic_close_connection(c, NGX_OK);
 }
@@ -2008,7 +2038,7 @@ ngx_quic_shutdown_quic(ngx_connection_t *c)
 {
     ngx_quic_connection_t  *qc;
 
-    if (c->reusable) {
+    if (c->reusable || ngx_quic_can_shutdown(c) == NGX_OK) {
         qc = ngx_quic_get_connection(c);
         ngx_quic_finalize_connection(c, qc->shutdown_code, qc->shutdown_reason);
     }

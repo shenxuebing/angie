@@ -382,6 +382,20 @@ static ngx_command_t  ngx_http_proxy_commands[] = {
       offsetof(ngx_http_proxy_loc_conf_t, upstream.socket_keepalive),
       NULL },
 
+    { ngx_string("proxy_socket_rcvbuf"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_proxy_loc_conf_t, upstream.socket_rcvbuf),
+      NULL },
+
+    { ngx_string("proxy_socket_sndbuf"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_proxy_loc_conf_t, upstream.socket_sndbuf),
+      NULL },
+
     { ngx_string("proxy_connect_timeout"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_msec_slot,
@@ -1192,6 +1206,8 @@ ngx_http_proxy_handler(ngx_http_request_t *r)
         if (ctx->v3_parse == NULL) {
             return NGX_ERROR;
         }
+
+        ctx->v3_parse->header_limit = u->conf->bufs.size * u->conf->bufs.num;
     }
 #endif
 
@@ -3897,6 +3913,8 @@ ngx_http_proxy_create_loc_conf(ngx_conf_t *cf)
 
     conf->upstream.local = NGX_CONF_UNSET_PTR;
     conf->upstream.socket_keepalive = NGX_CONF_UNSET;
+    conf->upstream.socket_rcvbuf = NGX_CONF_UNSET_SIZE;
+    conf->upstream.socket_sndbuf = NGX_CONF_UNSET_SIZE;
 
     conf->upstream.connect_timeout = NGX_CONF_UNSET_MSEC;
     conf->upstream.send_timeout = NGX_CONF_UNSET_MSEC;
@@ -4067,6 +4085,12 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->upstream.socket_keepalive,
                               prev->upstream.socket_keepalive, 0);
+
+    ngx_conf_merge_size_value(conf->upstream.socket_rcvbuf,
+                              prev->upstream.socket_rcvbuf, 0);
+
+    ngx_conf_merge_size_value(conf->upstream.socket_sndbuf,
+                              prev->upstream.socket_sndbuf, 0);
 
     ngx_conf_merge_msec_value(conf->upstream.connect_timeout,
                               prev->upstream.connect_timeout, 60000);
@@ -5906,7 +5930,7 @@ ngx_http_proxy_set_ssl(ngx_conf_t *cf, ngx_http_proxy_loc_conf_t *plcf)
     }
 
 #if (NGX_HTTP_V3 && NGX_QUIC_OPENSSL_COMPAT)
-    if (ngx_quic_compat_init(cf, plcf->upstream.ssl->ctx) != NGX_OK) {
+    if (ngx_quic_compat_ext_init(cf, plcf->upstream.ssl->ctx) != NGX_OK) {
         return NGX_ERROR;
     }
 #endif
@@ -6009,6 +6033,10 @@ ngx_http_proxy_set_ssl(ngx_conf_t *cf, ngx_http_proxy_loc_conf_t *plcf)
         ssl->keylog_file = plcf->upstream.ssl_keylog_file;
         SSL_CTX_set_keylog_callback(ssl->ctx, ngx_ssl_keylogger);
     }
+
+#if (NGX_HTTP_V3 && NGX_QUIC_OPENSSL_COMPAT)
+    ngx_quic_compat_keylog_init(plcf->upstream.ssl->ctx);
+#endif
 
     return NGX_OK;
 }
@@ -6773,7 +6801,7 @@ static ngx_int_t
 ngx_http_v3_proxy_body_length(ngx_http_request_t *r,
     ngx_http_v3_proxy_ctx_t *v3c)
 {
-    size_t                        body_len, n;
+    size_t                        body_len;
     ngx_http_proxy_ctx_t         *ctx;
     ngx_http_script_engine_t     *le;
     ngx_http_proxy_loc_conf_t    *plcf;
@@ -6783,8 +6811,6 @@ ngx_http_v3_proxy_body_length(ngx_http_request_t *r,
     ctx = ngx_http_get_module_ctx(r, ngx_http_proxy_module);
 
     le = &v3c->le;
-
-    n = 0;
 
     if (plcf->body_lengths) {
         le->ip = plcf->body_lengths->elts;
@@ -6798,7 +6824,6 @@ ngx_http_v3_proxy_body_length(ngx_http_request_t *r,
         }
 
         ctx->internal_body_length = body_len;
-        n += body_len;
 
     } else if (r->headers_in.chunked && r->reading_body) {
         ctx->internal_body_length = -1;
@@ -6806,10 +6831,8 @@ ngx_http_v3_proxy_body_length(ngx_http_request_t *r,
 
     } else {
         ctx->internal_body_length = r->headers_in.content_length_n;
-        n = r->headers_in.content_length_n;
     }
 
-    v3c->n += n;
 
     return NGX_OK;
 }
@@ -6853,14 +6876,26 @@ ngx_http_v3_proxy_encode_body(ngx_http_request_t *r,
 
         e->ip = plcf->body_values->elts;
         e->pos = b->last;
+        e->end = b->end;
         e->skip = 0;
 
         while (*(uintptr_t *) e->ip) {
             code = *(ngx_http_script_code_pt *) e->ip;
             code((ngx_http_script_engine_t *) e);
+
+            if (e->status) {
+                return NGX_CHAIN_ERROR;
+            }
         }
 
         b->last = e->pos;
+
+        if (b->last - b->pos != ctx->internal_body_length) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "evaluated v3 body does not match expected length");
+
+            return NGX_CHAIN_ERROR;
+        }
 
         return cl;
     }
@@ -7153,6 +7188,7 @@ ngx_http_v3_proxy_encode_headers(ngx_http_request_t *r,
 
     e->ip = headers->values->elts;
     e->pos = p;
+    e->end = p + max_head;
     e->request = r;
     e->flushed = 1;
 
@@ -7180,6 +7216,10 @@ ngx_http_v3_proxy_encode_headers(ngx_http_request_t *r,
             while (*(uintptr_t *) e->ip) {
                 code = *(ngx_http_script_code_pt *) e->ip;
                 code((ngx_http_script_engine_t *) e);
+
+                if (e->status) {
+                    return NGX_ERROR;
+                }
             }
             e->ip += sizeof(uintptr_t);
 
@@ -7191,16 +7231,32 @@ ngx_http_v3_proxy_encode_headers(ngx_http_request_t *r,
         code = *(ngx_http_script_code_pt *) e->ip;
         code((ngx_http_script_engine_t *) e);
 
+        if (e->status) {
+            return NGX_ERROR;
+        }
+
         tmp.len = e->pos - tmp.data;
         tmpv.data = e->pos;
 
         while (*(uintptr_t *) e->ip) {
             code = *(ngx_http_script_code_pt *) e->ip;
             code((ngx_http_script_engine_t *) e);
+
+            if (e->status) {
+                return NGX_ERROR;
+            }
         }
         e->ip += sizeof(uintptr_t);
 
         tmpv.len = e->pos - tmpv.data;
+
+        hlen = ngx_http_v3_encode_field_l(NULL, &tmp, &tmpv);
+
+        if ((b->end - b->last) < (ssize_t) hlen) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "no buffer space in v3 request buffer");
+            return NGX_ERROR;
+        }
 
         b->last = (u_char *) ngx_http_v3_encode_field_l(b->last, &tmp, &tmpv);
 
@@ -7234,6 +7290,15 @@ ngx_http_v3_proxy_encode_headers(ngx_http_request_t *r,
                 continue;
             }
 
+            hlen = ngx_http_v3_encode_field_l(NULL, &header[i].key,
+                                              &header[i].value);
+
+            if ((b->end - b->last) < (ssize_t) hlen) {
+                ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                              "no buffer space in v3 request buffer");
+                return NGX_ERROR;
+            }
+
             b->last = (u_char *) ngx_http_v3_encode_field_l(b->last,
                                                             &header[i].key,
                                                             &header[i].value);
@@ -7251,6 +7316,7 @@ ngx_http_v3_proxy_encode_headers(ngx_http_request_t *r,
 static ngx_int_t
 ngx_http_v3_proxy_reinit_request(ngx_http_request_t *r)
 {
+    ngx_http_upstream_t   *u;
     ngx_http_proxy_ctx_t  *ctx;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_proxy_module);
@@ -7259,12 +7325,16 @@ ngx_http_v3_proxy_reinit_request(ngx_http_request_t *r)
         return NGX_OK;
     }
 
-    r->upstream->process_header = ngx_http_v3_proxy_process_status_line;
-    r->upstream->pipe->input_filter = ngx_http_v3_proxy_copy_filter;
-    r->upstream->input_filter = ngx_http_v3_proxy_non_buffered_copy_filter;
+    u = r->upstream;
+
+    u->process_header = ngx_http_v3_proxy_process_status_line;
+    u->pipe->input_filter = ngx_http_v3_proxy_copy_filter;
+    u->input_filter = ngx_http_v3_proxy_non_buffered_copy_filter;
 
     r->state = 0;
     ngx_memzero(ctx->v3_parse, sizeof(ngx_http_v3_parse_t));
+
+    ctx->v3_parse->header_limit = u->conf->bufs.size * u->conf->bufs.num;
 
     return NGX_OK;
 }
@@ -7324,15 +7394,6 @@ ngx_http_v3_proxy_process_status_line(ngx_http_request_t *r)
 #endif
 
     h3c = ngx_http_v3_get_session(c);
-
-    if (ngx_list_init(&u->headers_in.headers, r->pool, 20,
-                      sizeof(ngx_table_elt_t))
-        != NGX_OK)
-    {
-        return NGX_ERROR;
-    }
-
-    ctx->v3_parse->header_limit = u->conf->bufs.size * u->conf->bufs.num;
 
     st = &ctx->v3_parse->headers;
     b = &u->buffer;

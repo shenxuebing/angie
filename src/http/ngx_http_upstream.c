@@ -176,6 +176,8 @@ static ngx_int_t ngx_http_upstream_rewrite_set_cookie(ngx_http_request_t *r,
     ngx_table_elt_t *h, ngx_uint_t offset);
 static ngx_int_t ngx_http_upstream_copy_allow_ranges(ngx_http_request_t *r,
     ngx_table_elt_t *h, ngx_uint_t offset);
+static ngx_int_t ngx_http_upstream_copy_upgrade(ngx_http_request_t *r,
+    ngx_table_elt_t *h, ngx_uint_t offset);
 
 static ngx_int_t ngx_http_upstream_add_variables(ngx_conf_t *cf);
 static ngx_int_t ngx_http_upstream_transport_variable(ngx_http_request_t *r,
@@ -324,6 +326,10 @@ static ngx_http_upstream_header_t  ngx_http_upstream_headers_in[] = {
                  ngx_http_upstream_ignore_header_line, 0,
                  ngx_http_upstream_copy_allow_ranges,
                  offsetof(ngx_http_headers_out_t, accept_ranges), 1 },
+
+    { ngx_string("Upgrade"),
+                 ngx_http_upstream_ignore_header_line, 0,
+                 ngx_http_upstream_copy_upgrade, 0, 0 },
 
     { ngx_string("Content-Range"),
                  ngx_http_upstream_ignore_header_line, 0,
@@ -758,6 +764,14 @@ ngx_http_upstream_init_request(ngx_http_request_t *r)
 
     if (u->conf->socket_keepalive) {
         u->peer.so_keepalive = 1;
+    }
+
+    if (u->conf->socket_rcvbuf) {
+        u->peer.rcvbuf = (int) u->conf->socket_rcvbuf;
+    }
+
+    if (u->conf->socket_sndbuf) {
+        u->peer.sndbuf = (int) u->conf->socket_sndbuf;
     }
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
@@ -1792,7 +1806,32 @@ ngx_http_upstream_connect(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     /* this is cached main quic connection with completed handshake */
     if (u->peer.cached && c->type == SOCK_DGRAM) {
-        if (ngx_http_v3_upstream_reuse_connection(r, u, c) != NGX_OK) {
+
+        rc = ngx_http_v3_upstream_reuse_connection(r, u, c);
+
+        if (rc == NGX_DECLINED) {
+            /*
+             * we failed to open a new stream on this connection: consider
+             * connection no longer usable;
+             * but it is not the failure of the upstream server
+             */
+
+            u->state->status = NGX_HTTP_BAD_GATEWAY;
+
+            u->peer.connected = 1;
+            u->peer.closed = c->read->eof;
+
+#if (NGX_API && NGX_HTTP_UPSTREAM_ZONE)
+            if (u->upstream != NULL && u->upstream->shm_zone != NULL) {
+                ngx_http_upstream_stat(&u->peer, 0);
+            }
+#endif
+
+            ngx_http_upstream_close_peer_connection(r, u, 1);
+
+            ngx_http_upstream_connect(r, u);
+
+        } else if (rc != NGX_OK) {
             ngx_http_upstream_finalize_request(r, u,
                                                NGX_HTTP_INTERNAL_SERVER_ERROR);
         }
@@ -3008,7 +3047,10 @@ done:
          * the status previously set by the module in u->state->status.
          */
 
-        u->state->bytes_sent = u->peer.connection->sent;
+        u->state->bytes_sent = c->sent;
+
+        u->peer.connected = 1;
+        u->peer.closed = c->read->eof;
 
 #if (NGX_API && NGX_HTTP_UPSTREAM_ZONE)
         if (u->upstream != NULL && u->upstream->shm_zone != NULL) {
@@ -3230,15 +3272,6 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
             && !(u->request_sent && r->request_body_no_buffering)
             && !(timeout && ngx_current_msec - u->peer.start_time >= timeout))
         {
-
-            if (u->request_sent
-                && (r->method & (NGX_HTTP_POST|NGX_HTTP_LOCK|NGX_HTTP_PATCH))
-                && !(u->conf->next_upstream
-                     & NGX_HTTP_UPSTREAM_FT_NON_IDEMPOTENT))
-            {
-                return NGX_OK;
-            }
-
             ngx_http_upstream_next(r, u, un->mask);
             return NGX_OK;
         }
@@ -4672,6 +4705,12 @@ ngx_http_upstream_thread_handler(ngx_thread_task_t *task, ngx_file_t *file)
     task->event.data = r;
     task->event.handler = ngx_http_upstream_thread_event_handler;
 
+    if (r->main->blocked >= NGX_HTTP_MAX_BLOCKED) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "too many operations pending");
+        return NGX_ERROR;
+    }
+
     if (ngx_thread_task_post(tp, task) != NGX_OK) {
         return NGX_ERROR;
     }
@@ -5232,8 +5271,16 @@ ngx_http_upstream_close_peer_connection(ngx_http_request_t *r,
         ngx_http_v3_upstream_close_request_stream(sc, 1);
 
         if (u->h3_started && !u->hq) {
-            /* HTTP/3 was initialized on this stream, close gracefully */
+
+            /* HTTP/3 was initialized on this stream, close gracefully;
+             * main connection will be closed after shutdown
+             */
             ngx_http_v3_shutdown(c);
+
+            u->peer.cached = 0;
+            u->peer.connection = NULL;
+
+            return;
         }
     }
 
@@ -5294,12 +5341,15 @@ ngx_http_upstream_free_peer(ngx_http_upstream_t *u, ngx_uint_t ft_type)
         break;
     }
 
-    if (pc->free) {
-        pc->free(pc, pc->data, state);
-    }
+    pc->connected = pc->connection ? 1 : 0;
+    pc->closed = pc->connection ? pc->connection->read->eof : 0;
 
     if (pc->close) {
         pc->close(pc, pc->data, state);
+    }
+
+    if (pc->free) {
+        pc->free(pc, pc->data, state);
     }
 
     pc->sockaddr = NULL;
@@ -6394,6 +6444,27 @@ ngx_http_upstream_copy_allow_ranges(ngx_http_request_t *r,
     ho->next = NULL;
 
     r->headers_out.accept_ranges = ho;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_upstream_copy_upgrade(ngx_http_request_t *r, ngx_table_elt_t *h,
+    ngx_uint_t offset)
+{
+    ngx_table_elt_t  *ho;
+
+    if (r->http_version >= NGX_HTTP_VERSION_20) {
+        return NGX_OK;
+    }
+
+    ho = ngx_list_push(&r->headers_out.headers);
+    if (ho == NULL) {
+        return NGX_ERROR;
+    }
+
+    *ho = *h;
 
     return NGX_OK;
 }
@@ -7975,7 +8046,7 @@ ngx_http_v3_upstream_reuse_connection(ngx_http_request_t *r,
 
     sc = ngx_quic_open_stream(c, 1);
     if (sc == NULL) {
-        return NGX_ERROR;
+        return NGX_DECLINED;
     }
 
     sc->data = r;

@@ -35,7 +35,7 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     upstream u1 {
-        server 127.0.0.1:8099; # dead
+        server unix:%%TESTDIR%%/no-such.sock; # nobody should listen on it
         server 127.0.0.1:8082;
     }
 
@@ -106,7 +106,7 @@ EOF
 $t->run();
 
 like(http_get('/'), qr/PROXIED/, 'visited upstream');
-like(http_get('/bad'), qr/500/, 'triggered bad upstream');
+like(http_get('/bad'), qr/500 Internal/, 'triggered bad upstream');
 
 $t->stop();
 

@@ -234,17 +234,17 @@ foreach my $name ('localhost') {
 		or plan(skip_all => "missing engine");
 }
 
-if ($t->has_module('LibreSSL|BoringSSL|AWS-LC')) {
-	$t->try_run('loading "engine:..." certificate keys is not supported');
-} elsif ($t->{_configure_args} =~ /tongsuo/
+if ($t->{_configure_args} =~ /tongsuo/
 	|| $t->has_module('OpenSSL [.0-9]+\+quic')) {
 	$t->try_run('no such engine:id=pkcs11');
 } else {
-	$t->run();
+	$t->try_run('loading "engine:..." certificate keys is not supported');
 }
 
 $t->plan(2);
 $t->write_file('index.html', '');
+
+$t->skip_stderr_check('Workaround for .+ enabled', 'no such engine:id=rdrand');
 
 ###############################################################################
 

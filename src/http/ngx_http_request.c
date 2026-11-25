@@ -1058,7 +1058,8 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
     cscf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_core_module);
 
     if (cscf->status_zone != NULL) {
-        ngx_http_calculate_ssl_statistic(c, cscf->status_zone);
+        ngx_http_calculate_ssl_statistic(c, cscf->status_zone,
+                                         c->read->timedout);
     }
 #endif
 
@@ -2338,13 +2339,20 @@ ngx_http_process_request_header(ngx_http_request_t *r)
 
     cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
 
-    if (r->method == NGX_HTTP_CONNECT
-        && (r->http_version != NGX_HTTP_VERSION_11 || !cscf->allow_connect))
-    {
-        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "client sent CONNECT method");
-        ngx_http_finalize_request(r, NGX_HTTP_NOT_ALLOWED);
-        return NGX_ERROR;
+    if (r->method == NGX_HTTP_CONNECT) {
+        if (r->http_version != NGX_HTTP_VERSION_11 || !cscf->allow_connect) {
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "client sent CONNECT method");
+            ngx_http_finalize_request(r, NGX_HTTP_NOT_ALLOWED);
+            return NGX_ERROR;
+        }
+
+        if (r->headers_in.content_length_n > 0 || r->headers_in.chunked) {
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "client sent CONNECT request with body");
+            ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
+            return NGX_ERROR;
+        }
     }
 
     if (r->method == NGX_HTTP_TRACE) {
@@ -4499,7 +4507,7 @@ ngx_http_calculate_request_statistic(ngx_http_request_t *r,
 
 void
 ngx_http_calculate_ssl_statistic(ngx_connection_t *c,
-    ngx_http_status_zone_t *status_zone)
+    ngx_http_status_zone_t *status_zone, ngx_uint_t timedout)
 {
     ngx_http_request_t       *r;
     ngx_http_server_stats_t  *stats;
@@ -4534,7 +4542,7 @@ ngx_http_calculate_ssl_statistic(ngx_connection_t *c,
             (void) ngx_atomic_fetch_add(&stats->ssl.reuses, 1);
         }
 
-    } else if (c->read->timedout) {
+    } else if (timedout) {
         (void) ngx_atomic_fetch_add(&stats->ssl.timedout, 1);
 
     } else {

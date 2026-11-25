@@ -4365,6 +4365,19 @@ failed:
 
 done:
 
+#if (defined BIO_get_ktls_recv && NGX_LINUX)
+
+    /*
+     * with kernel TLS, recv() fails with EIO on a record
+     * other than application data, such as "close notify"
+     */
+
+    if (BIO_get_ktls_recv(SSL_get_rbio(c->ssl->connection)) == 1) {
+        c->ktls_recv = 1;
+    }
+
+#endif
+
     if (c->ssl->shutdown_without_free) {
         c->ssl->shutdown_without_free = 0;
         c->recv = ngx_recv;
@@ -5805,7 +5818,7 @@ ngx_ssl_rotate_ticket_keys(SSL_CTX *ssl_ctx, ngx_log_t *log)
     /* sync keys to the worker process memory */
 
     ngx_memcpy(keys->elts, cache->ticket_keys,
-               2 * sizeof(ngx_ssl_ticket_key_t));
+               keys->nelts * sizeof(ngx_ssl_ticket_key_t));
 
     ngx_shmtx_unlock(&shpool->mutex);
 

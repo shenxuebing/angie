@@ -1149,7 +1149,7 @@ ngx_configure_quic_socket(ngx_socket_t s, ngx_addr_t *addr, ngx_log_t *log)
         }
     }
 
-#elif (NGX_HAVE_IP_DONTFRAG)
+#elif (NGX_HAVE_IPV6_DONTFRAG)
     {
         int  value;
 
@@ -1677,6 +1677,12 @@ ngx_connection_error(ngx_connection_t *c, ngx_err_t err, char *text)
     if (err == NGX_EMSGSIZE && c->log_error == NGX_ERROR_IGNORE_EMSGSIZE) {
         return 0;
     }
+
+#if (NGX_LINUX)
+    if (err == NGX_EIO && c->ktls_recv) {
+        return 0;
+    }
+#endif
 
     if (err == 0
         || err == NGX_ECONNRESET

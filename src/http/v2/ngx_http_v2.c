@@ -1803,6 +1803,10 @@ ngx_http_v2_state_process_header(ngx_http_v2_connection_t *h2c, u_char *pos,
         return ngx_http_v2_connection_error(h2c, NGX_HTTP_V2_INTERNAL_ERROR);
     }
 
+    if (ngx_http_v2_construct_request_line(r) != NGX_OK) {
+        goto error;
+    }
+
     if (r->invalid_header) {
         cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
 
@@ -2181,6 +2185,8 @@ ngx_http_v2_state_settings(ngx_http_v2_connection_t *h2c, u_char *pos,
         return ngx_http_v2_connection_error(h2c, NGX_HTTP_V2_SIZE_ERROR);
     }
 
+    h2c->state.window_delta = 0;
+
     return ngx_http_v2_state_settings_params(h2c, pos, end);
 }
 
@@ -2189,11 +2195,8 @@ static u_char *
 ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
     u_char *end)
 {
-    ssize_t                   window_delta;
     ngx_uint_t                id, value;
     ngx_http_v2_out_frame_t  *frame;
-
-    window_delta = 0;
 
     while (h2c->state.length) {
         if (end - pos < NGX_HTTP_V2_SETTINGS_PARAM_SIZE) {
@@ -2222,7 +2225,8 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
                                                   NGX_HTTP_V2_FLOW_CTRL_ERROR);
             }
 
-            window_delta = value - h2c->init_window;
+            h2c->state.window_delta = (ssize_t) value
+                                      - (ssize_t) h2c->init_window;
             break;
 
         case NGX_HTTP_V2_MAX_FRAME_SIZE_SETTING:
@@ -2275,13 +2279,16 @@ ngx_http_v2_state_settings_params(ngx_http_v2_connection_t *h2c, u_char *pos,
 
     ngx_http_v2_queue_ordered_frame(h2c, frame);
 
-    if (window_delta) {
-        h2c->init_window += window_delta;
+    if (h2c->state.window_delta) {
+        h2c->init_window += h2c->state.window_delta;
 
-        if (ngx_http_v2_adjust_windows(h2c, window_delta) != NGX_OK) {
+        if (ngx_http_v2_adjust_windows(h2c, h2c->state.window_delta) != NGX_OK)
+        {
             return ngx_http_v2_connection_error(h2c,
                                                 NGX_HTTP_V2_INTERNAL_ERROR);
         }
+
+        h2c->state.window_delta = 0;
     }
 
     return ngx_http_v2_state_complete(h2c, pos, end);
@@ -2481,13 +2488,13 @@ ngx_http_v2_state_window_update(ngx_http_v2_connection_t *h2c, u_char *pos,
         return ngx_http_v2_state_complete(h2c, pos, end);
     }
 
-    if (window > NGX_HTTP_V2_MAX_WINDOW - h2c->send_window) {
+    if (window > NGX_HTTP_V2_MAX_WINDOW - h2c->send_window - h2c->send_queued) {
         ngx_log_error(NGX_LOG_INFO, h2c->connection->log, 0,
                       "client violated connection flow control: "
                       "received WINDOW_UPDATE frame "
                       "with window increment %uz "
                       "not allowed for window %uz",
-                      window, h2c->send_window);
+                      window, h2c->send_window + h2c->send_queued);
 
         return ngx_http_v2_connection_error(h2c, NGX_HTTP_V2_FLOW_CTRL_ERROR);
     }
@@ -3108,6 +3115,8 @@ ngx_http_v2_create_stream(ngx_http_v2_connection_t *h2c)
 
     h2c->priority_limit += h2scf->concurrent_streams;
 
+    ngx_reusable_connection(h2c->connection, 0);
+
     if (h2c->connection->read->timer_set) {
         ngx_del_timer(h2c->connection->read);
     }
@@ -3299,6 +3308,13 @@ ngx_http_v2_pseudo_header(ngx_http_request_t *r, ngx_http_v2_header_t *header)
 {
     header->name.len--;
     header->name.data++;
+
+    if (r->request_line.len) {
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                      "client sent out of order pseudo-headers");
+
+        return NGX_DECLINED;
+    }
 
     switch (header->name.len) {
     case 4:
@@ -3573,6 +3589,10 @@ ngx_http_v2_construct_request_line(ngx_http_request_t *r)
     u_char  *p;
 
     static const u_char ending[] = " HTTP/2.0";
+
+    if (r->request_line.len) {
+        return NGX_OK;
+    }
 
     if (r->method_name.len == 0
         || r->schema.len == 0

@@ -52,11 +52,12 @@ static void ngx_quic_copy_chain_data(ngx_chain_t *dst_chain,
 static ngx_int_t ngx_quic_stream_flush(ngx_quic_stream_t *qs);
 static void ngx_quic_stream_cleanup_handler(void *data);
 static ngx_int_t ngx_quic_close_stream(ngx_quic_stream_t *qs);
-static ngx_int_t ngx_quic_can_shutdown(ngx_connection_t *c);
 static ngx_int_t ngx_quic_control_flow(ngx_quic_stream_t *qs, uint64_t last);
 static ngx_int_t ngx_quic_update_flow(ngx_quic_stream_t *qs, uint64_t last);
 static ngx_int_t ngx_quic_update_max_stream_data(ngx_quic_stream_t *qs);
 static ngx_int_t ngx_quic_update_max_data(ngx_connection_t *c);
+static ngx_int_t ngx_quic_queue_data_blocked(ngx_connection_t *c);
+static ngx_int_t ngx_quic_queue_stream_data_blocked(ngx_quic_stream_t *qs);
 static void ngx_quic_set_event(ngx_event_t *ev);
 
 
@@ -68,19 +69,20 @@ ngx_quic_open_stream(ngx_connection_t *c, ngx_uint_t bidi)
     ngx_quic_stream_t       *qs;
     ngx_quic_connection_t   *qc;
     ngx_quic_stream_ctl_t   *sctl;
-    ngx_quic_stream_peer_t  *peer;
+    ngx_quic_stream_peer_t  *self;
 
     pc = c->quic ? c->quic->parent : c;
     qc = ngx_quic_get_connection(pc);
 
-    if (qc->closing) {
+    if (qc->closing || (qc->shutdown && bidi)) {
         ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0,
-                       "quic open stream failed: already closing");
+                       "quic open stream failed: already closing "
+                       "or shutting down");
         return NULL;
     }
 
-    peer = qc->client ? &qc->streams.client : &qc->streams.server;
-    sctl = bidi ? &peer->bidi : &peer->uni;
+    self = qc->client ? &qc->streams.client : &qc->streams.server;
+    sctl = bidi ? &self->bidi : &self->uni;
 
     if (sctl->count >= sctl->max) {
         ngx_log_debug3(NGX_LOG_DEBUG_EVENT, c->log, 0,
@@ -415,7 +417,7 @@ ngx_quic_get_stream(ngx_connection_t *c, uint64_t id)
     ngx_quic_stream_t       *qs;
     ngx_quic_connection_t   *qc;
     ngx_quic_stream_ctl_t   *sctl;
-    ngx_quic_stream_peer_t  *peer;
+    ngx_quic_stream_peer_t  *self, *peer;
 
     qc = ngx_quic_get_connection(c);
 
@@ -435,9 +437,9 @@ ngx_quic_get_stream(ngx_connection_t *c, uint64_t id)
     if (ngx_quic_out_stream(qc, id)) {
         /* stream is initiated by us, but peer is trying to use it */
 
-        peer = qc->client ? &qc->streams.client : &qc->streams.server;
+        self = qc->client ? &qc->streams.client : &qc->streams.server;
 
-        sctl = ngx_quic_uni_stream(id) ? &peer->uni : &peer->bidi;
+        sctl = ngx_quic_uni_stream(id) ? &self->uni : &self->bidi;
 
         if ((id >> 2) < sctl->count) {
             return NGX_QUIC_STREAM_GONE;
@@ -752,12 +754,15 @@ ngx_quic_create_stream(ngx_connection_t *c, uint64_t id)
         addr_text.data = NULL;
     }
 
+    ngx_rbtree_insert(&qc->streams.tree, &qs->node);
+
     reusable = c->reusable;
     ngx_reusable_connection(c, 0);
 
     sc = ngx_get_connection(c->fd, log);
     if (sc == NULL) {
         ngx_destroy_pool(pool);
+        ngx_rbtree_delete(&qc->streams.tree, &qs->node);
         ngx_queue_insert_tail(&qc->streams.free, &qs->queue);
         ngx_reusable_connection(c, reusable);
         return NULL;
@@ -801,6 +806,7 @@ ngx_quic_create_stream(ngx_connection_t *c, uint64_t id)
     if (cln == NULL) {
         ngx_close_connection(sc);
         ngx_destroy_pool(pool);
+        ngx_rbtree_delete(&qc->streams.tree, &qs->node);
         ngx_queue_insert_tail(&qc->streams.free, &qs->queue);
         ngx_reusable_connection(c, reusable);
         return NULL;
@@ -808,8 +814,6 @@ ngx_quic_create_stream(ngx_connection_t *c, uint64_t id)
 
     cln->handler = ngx_quic_stream_cleanup_handler;
     cln->data = sc;
-
-    ngx_rbtree_insert(&qc->streams.tree, &qs->node);
 
     ngx_log_debug2(NGX_LOG_DEBUG_EVENT, sc->log, 0,
                    "quic stream id:0x%xL created in connection *%uA", id,
@@ -1258,6 +1262,33 @@ ngx_quic_stream_flush(ngx_quic_stream_t *qs)
     ngx_log_debug2(NGX_LOG_DEBUG_EVENT, pc->log, 0,
                    "quic stream id:0x%xL flush limit:%O", qs->id, limit);
 
+    /* clear blocked state once flow-control credit becomes available again */
+
+    if (qc->streams.send_offset < qc->streams.send_max_data) {
+        qc->streams.blocked = 0;
+    }
+
+    if (qs->send_offset < qs->send_max_data) {
+        qs->blocked = 0;
+    }
+
+    /*
+     * There is buffered application data, but no flow-control credit to
+     * send it.  Advertise the blocked condition (RFC 9000, Section 4.1) so
+     * a peer that lost or delayed its MAX_DATA / MAX_STREAM_DATA update has
+     * an ack-eliciting signal to retransmit it within one RTT, rather than
+     * leaving the stream stalled until the idle timeout fires.
+     */
+
+    if (limit == 0 && qs->send.offset < qs->sent) {
+
+        if (qc->streams.send_offset >= qc->streams.send_max_data) {
+            return ngx_quic_queue_data_blocked(pc);
+        }
+
+        return ngx_quic_queue_stream_data_blocked(qs);
+    }
+
     len = qs->send.offset;
 
     out = ngx_quic_read_buffer(pc, &qs->send, limit);
@@ -1428,7 +1459,7 @@ ngx_quic_close_stream(ngx_quic_stream_t *qs)
 }
 
 
-static ngx_int_t
+ngx_int_t
 ngx_quic_can_shutdown(ngx_connection_t *c)
 {
     ngx_rbtree_t           *tree;
@@ -1797,12 +1828,15 @@ ngx_int_t
 ngx_quic_handle_max_streams_frame(ngx_connection_t *c,
     ngx_quic_header_t *pkt, ngx_quic_max_streams_frame_t *f)
 {
-    ngx_quic_stream_ctl_t  *sctl;
-    ngx_quic_connection_t  *qc;
+    ngx_quic_stream_ctl_t   *sctl;
+    ngx_quic_connection_t   *qc;
+    ngx_quic_stream_peer_t  *self;
 
     qc = ngx_quic_get_connection(c);
 
-    sctl = f->bidi ? &qc->streams.server.bidi : &qc->streams.server.uni;
+    self = qc->client ? &qc->streams.client : &qc->streams.server;
+
+    sctl = f->bidi ? &self->bidi : &self->uni;
 
     if (sctl->max < f->limit) {
         sctl->max = f->limit;
@@ -2041,6 +2075,74 @@ ngx_quic_update_max_data(ngx_connection_t *c)
     frame->u.max_data.max_data = qc->streams.recv_max_data;
 
     ngx_quic_queue_frame(qc, frame);
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_quic_queue_data_blocked(ngx_connection_t *c)
+{
+    ngx_quic_frame_t       *frame;
+    ngx_quic_connection_t  *qc;
+
+    qc = ngx_quic_get_connection(c);
+
+    if (qc->streams.blocked) {
+        return NGX_OK;
+    }
+
+    frame = ngx_quic_alloc_frame(c);
+    if (frame == NULL) {
+        return NGX_ERROR;
+    }
+
+    frame->level = NGX_QUIC_ENCRYPTION_APPLICATION;
+    frame->type = NGX_QUIC_FT_DATA_BLOCKED;
+    frame->u.data_blocked.limit = qc->streams.send_max_data;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_EVENT, c->log, 0,
+                   "quic data blocked limit:%uL", qc->streams.send_max_data);
+
+    ngx_quic_queue_frame(qc, frame);
+
+    qc->streams.blocked = 1;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_quic_queue_stream_data_blocked(ngx_quic_stream_t *qs)
+{
+    ngx_connection_t       *pc;
+    ngx_quic_frame_t       *frame;
+    ngx_quic_connection_t  *qc;
+
+    pc = qs->parent;
+    qc = ngx_quic_get_connection(pc);
+
+    if (qs->blocked) {
+        return NGX_OK;
+    }
+
+    frame = ngx_quic_alloc_frame(pc);
+    if (frame == NULL) {
+        return NGX_ERROR;
+    }
+
+    frame->level = NGX_QUIC_ENCRYPTION_APPLICATION;
+    frame->type = NGX_QUIC_FT_STREAM_DATA_BLOCKED;
+    frame->u.stream_data_blocked.id = qs->id;
+    frame->u.stream_data_blocked.limit = qs->send_max_data;
+
+    ngx_log_debug2(NGX_LOG_DEBUG_EVENT, pc->log, 0,
+                   "quic stream id:0x%xL data blocked limit:%uL",
+                   qs->id, qs->send_max_data);
+
+    ngx_quic_queue_frame(qc, frame);
+
+    qs->blocked = 1;
 
     return NGX_OK;
 }

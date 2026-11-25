@@ -48,7 +48,7 @@
 
 typedef ngx_int_t (*ngx_quic_init_pt)(ngx_connection_t *c);
 typedef ngx_int_t (*ngx_quic_ssl_handshake_pt)(ngx_connection_t *c,
-    ngx_uint_t initialized);
+    ngx_uint_t initialized, ngx_uint_t timedout);
 typedef void (*ngx_quic_shutdown_pt)(ngx_connection_t *c);
 
 typedef ngx_int_t (*ngx_quic_init_ssl_pt)(ngx_connection_t *c, void *data);
@@ -132,6 +132,7 @@ struct ngx_quic_stream_s {
     ngx_quic_stream_recv_state_e   recv_state;
     unsigned                       cancelable:1;
     unsigned                       fin_acked:1;
+    unsigned                       blocked:1;
 };
 
 

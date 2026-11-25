@@ -21,9 +21,9 @@ use Test::Nginx qw/ :DEFAULT http_end /;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $bad_msg = 'invalid URL prefix in \"http://\", client: \"127.0.0.1\",'
-	. ' server: \"localhost\", request_line: \"GET /bad HTTP/1.0\",'
-	. ' host: \"localhost\"';
+my $bad_msg = 'invalid URL prefix in "http://", client: "127.0.0.1",'
+	. ' server: "localhost", request_line: "GET /bad HTTP/1.0",'
+	. ' host: "localhost"';
 
 my $t = Test::Nginx->new()->has(qw/http realip rewrite proxy/)
 	->plan(18)->write_file_expand('nginx.conf', <<"EOF");
@@ -36,7 +36,7 @@ events {
 }
 
 error_log default.log;
-error_log filtered_exact.log "filter=logline:=$bad_msg";
+error_log filtered_exact.log 'filter=logline:=$bad_msg';
 error_log filtered_substring.log filter=logline:127.0.0.3;
 error_log filtered_regex.log filter=logline:~127\.0\.0\.4;
 
@@ -80,12 +80,13 @@ EOF
 
 $t->run();
 
-like(http_sp_xff('/foo', '127.0.0.1'), qr/404/, 'generic client query');
-like(http_sp_xff('/f1', '127.0.0.2'), qr/404/, 'query client f1');
-like(http_sp_xff('/f2', '127.0.0.3'), qr/404/, 'query client f2');
-like(http_sp_xff('/f2', '127.0.0.4'), qr/404/, 'query client f3');
+like(http_sp_xff('/foo', '127.0.0.1'), qr/404 Not Found/,
+	'generic client query');
+like(http_sp_xff('/f1', '127.0.0.2'), qr/404 Not Found/, 'query client f1');
+like(http_sp_xff('/f2', '127.0.0.3'), qr/404 Not Found/, 'query client f2');
+like(http_sp_xff('/f2', '127.0.0.4'), qr/404 Not Found/, 'query client f3');
 
-like(http_get('/bad'), qr/500/, 'triggered exact error');
+like(http_get('/bad'), qr/500 Internal/, 'triggered exact error');
 
 $t->stop();
 

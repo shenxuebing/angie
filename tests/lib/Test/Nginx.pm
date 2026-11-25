@@ -122,6 +122,30 @@ sub DESTROY {
 		my $errors = join "\n",
 			$self->find_in_file('error.log', qr/.+Sanitizer.+/);
 		Test::More::is($errors, '', 'no sanitizer errors');
+
+		SKIP: {
+			Test::More::skip('do not check stderr', 1)
+				if $self->{_skip_stderr_check};
+
+			my @stderr_lines;
+			if (-e $self->{_testdir} . '/stderr') {
+				@stderr_lines = $self->get_file_lines('stderr');
+			}
+
+			my $errors_re = join('|',
+				@{ $self->{_errors_to_skip}{stderr} // [] });
+
+			my $ok;
+			if (length $errors_re) {
+				$ok = Test::More::ok(
+					! (grep { $_ !~ qr/$errors_re/ } @stderr_lines),
+					'no unexpected records in stderr');
+			} else {
+				$ok = Test::More::is(@stderr_lines, 0, 'stderr is empty');
+			}
+			Test::More::diag('all stderr records: '
+				. join("\n", @stderr_lines)) unless $ok;
+		}
 	}
 
 	if ($do_log_check && $ENV{TEST_ANGIE_VALGRIND}) {
@@ -398,6 +422,21 @@ sub has_feature($) {
 		return 1;
 	}
 
+	if ($feature eq 'inet6') {
+		eval { require IO::Socket::IP; };
+		return 0 if $@;
+
+		my $s = IO::Socket::IP->new(
+			LocalAddr => '::1',
+			GetAddrInfoFlags => Socket::AI_NUMERICHOST(),
+			Listen => 1
+		);
+		return 0 unless $s;
+
+		$s->close;
+		return 1;
+	}
+
 	$self->{_build_env} = `$NGINX --build-env 2>&1`
 		if !defined $self->{_build_env};
 
@@ -420,47 +459,89 @@ sub has_daemon($) {
 	return $self;
 }
 
+sub match_skip_message {
+	my ($self, $log_file, @messages) = @_;
+
+	return
+		unless -e $self->{_testdir} . '/' . $log_file;
+
+	my $log = $self->read_file($log_file);
+
+	foreach my $message (@messages) {
+		my ($label, $pattern);
+
+		if (ref $message eq 'ARRAY') {
+			($label, $pattern) = @{ $message };
+		} else {
+			($label, $pattern) = ($message, $message);
+		}
+
+		$pattern = quotemeta($pattern) unless ref $pattern;
+
+		if ($log =~ $pattern) {
+			return $label;
+		}
+	}
+
+	return;
+}
+
 sub try_run {
 	my ($self, @messages) = @_;
 
 	eval {
-		open OLDERR, ">&", \*STDERR; close STDERR;
 		$self->run();
 	};
-	open STDERR, ">&", \*OLDERR;
 
 	return $self unless $@;
 
-	if ($ENV{TEST_ANGIE_VERBOSE}) {
+	$self->{_skip_stderr_check} = 1;
+
+	if ($ENV{TEST_ANGIE_VERBOSE} && -e $self->{_testdir} . '/error.log') {
 		open F, '<', $self->{_testdir} . '/error.log'
 			or die "Can't open error.log: $!";
 		log_core($_) while (<F>);
 		close F;
 	}
 
-	my $error_log = $self->read_file('error.log');
-	foreach my $message (@messages) {
-		if ($error_log =~ quotemeta($message)) {
-			Test::More::plan(skip_all => $message);
-			return $self;
-		}
+	my $skip = $self->match_skip_message('error.log', @messages);
+	if ($skip) {
+		Test::More::plan(skip_all => $skip);
+		return $self;
+	}
+
+	$skip = $self->match_skip_message('stderr', @messages);
+	if ($skip) {
+		Test::More::plan(skip_all => $skip);
+		return $self;
 	}
 
 	die $@;
 }
 
-sub retry_run($$) {
-	my ($self, $attempts) = @_;
+sub retry_run {
+	my ($self, $attempts, @messages) = @_;
 
 	for my $k (1 .. $attempts) {
 		eval {
-			open OLDERR, ">&", \*STDERR; close STDERR;
 			$self->run();
-			open STDERR, ">&", \*OLDERR;
 		};
 
 		unless ($@) {
+			$self->{_skip_stderr_check} = 1;
 			undef $self->{_setup_failed};
+			return $self;
+		}
+
+		my $skip = $self->match_skip_message('error.log', @messages);
+		if ($skip) {
+			Test::More::plan(skip_all => $skip);
+			return $self;
+		}
+
+		$skip = $self->match_skip_message('stderr', @messages);
+		if ($skip) {
+			Test::More::plan(skip_all => $skip);
 			return $self;
 		}
 
@@ -475,7 +556,7 @@ sub plan($) {
 
 	$plan += 1 if $ENV{TEST_ANGIE_VALGRIND};
 
-	Test::More::plan(tests => $plan + 5);
+	Test::More::plan(tests => $plan + 6);
 
 	return $self;
 }
@@ -485,6 +566,18 @@ sub skip_errors_check {
 
 	$self->{_errors_to_skip}{$level} //= [];
 	push @{ $self->{_errors_to_skip}{$level} }, @pattern;
+
+	return $self;
+}
+
+sub skip_stderr_check {
+	my ($self, @pattern) = @_;
+
+	if (@pattern) {
+		$self->skip_errors_check('stderr', @pattern);
+	} else {
+		$self->{_skip_stderr_check} = 1;
+	}
 
 	return $self;
 }
@@ -514,6 +607,10 @@ sub run(;$) {
 	my $pid = fork();
 	die "Unable to fork(): $!\n" unless defined $pid;
 
+	open OLDERR, ">&", \*STDERR;
+	open STDERR, '>>', "$testdir/stderr"
+		or die "Can't reopen STDERR: $!";
+
 	if ($pid == 0) {
 		# nginx main process and its workers will have the same process group
 		# this will give us the ability to kill them simultaneously
@@ -541,8 +638,23 @@ sub run(;$) {
 		# try to kill pid to prevent tests from hanging
 		stop_pid($pid, 1);
 
-		die "Can't start nginx" . (($@) ? ": $@" : '');
+		open STDERR, '>&', \*OLDERR;
+		my $error_log;
+		$error_log = $self->read_file('error.log')
+			if -e $self->{_testdir} . '/error.log';
+
+		my $stderr;
+		$stderr = $self->read_file('stderr')
+			if -e $self->{_testdir} . '/stderr';
+
+		die "Can't start nginx"
+			. (($@) ? ": $@" : '')
+			. (($error_log) ? "\n$error_log" : '')
+			. (($stderr) ? "\n$stderr" : '');
 	}
+
+	open STDERR, '>&', \*OLDERR;
+	close OLDERR;
 
 	$self->{_started} = 1;
 	return $self;
@@ -647,7 +759,7 @@ sub waitforfile($;$) {
 	my ($self, $file, $pid) = @_;
 	my $exited;
 
-	my $sec = 20;
+	my $sec = 60;
 
 	# wait for file to appear
 	# or specified process to exit
@@ -673,7 +785,7 @@ sub waitforsocket($) {
 	my ($self, $peer, $proto) = @_;
 
 	$proto //= 'tcp';
-	my $sec = 5;
+	my $sec = 60;
 
 	# wait for socket to accept connections
 
@@ -696,7 +808,7 @@ sub waitforsocket($) {
 sub waitforsslsocket($) {
 	my ($self, $peer) = @_;
 
-	my $sec = 5;
+	my $sec = 60;
 
 	# wait for socket to accept connections
 
@@ -774,8 +886,16 @@ EOF
 	my $resolver_started = eval {
 		$self->waitforfile("$d/dnsmasq.pid", $resolver_pid);
 	};
-	die "Can't start dnsmasq on port $port" . (($@) ? ": $@" : '')
-		if !$resolver_started || $@;
+
+	if (!$resolver_started || $@) {
+		my $dns_log;
+		$dns_log = $self->read_file('dns.log')
+			if -e "$d/dns.log";
+
+		die "Can't start dnsmasq on port $port"
+			. (($@) ? ": $@" : '')
+			. (($dns_log) ? "\n$dns_log" : '');
+	}
 }
 
 sub stop_resolver {
@@ -912,6 +1032,21 @@ sub read_file($) {
 	return $content;
 }
 
+sub get_file_lines {
+	my ($self, $name) = @_;
+
+	open my $fh, '<', $self->{_testdir} . '/' . $name
+		or die "Can't open $name: $!";
+
+	my @lines;
+	for my $line (<$fh>) {
+		$line = trim($line);
+		push @lines, $line;
+	}
+
+	return @lines;
+}
+
 sub grep_file($$) {
 	my ($self, $name, $regex) = @_;
 
@@ -927,6 +1062,8 @@ sub find_in_file {
 
 	open F, '<', $self->{_testdir} . '/' . $name
 		or die "Can't open $name: $!";
+
+	$pattern = qr/\Q$pattern\E/ if ref($pattern) eq '';
 
 	my @found;
 	while (my $line = <F>) {
@@ -975,10 +1112,10 @@ sub write_file($$) {
 	return $self;
 }
 
-sub write_file_expand($$) {
-	my ($self, $name, $content) = @_;
+sub write_file_expand {
+	my ($self, $name, $content, $no_error_log) = @_;
 
-	$content =~ s/%%TEST_GLOBALS%%/$self->test_globals()/gmse;
+	$content =~ s/%%TEST_GLOBALS%%/$self->test_globals($no_error_log)/gmse;
 
 	# evaluate possible value of the corresponding environment variable
 	my $events = $self->test_globals_events();
@@ -1080,8 +1217,8 @@ EOF
 	}
 }
 
-sub test_globals() {
-	my ($self) = @_;
+sub test_globals {
+	my ($self, $no_error_log) = @_;
 
 	return $self->{_test_globals}
 		if defined $self->{_test_globals};
@@ -1089,7 +1226,8 @@ sub test_globals() {
 	my $s = '';
 
 	$s .= "pid $self->{_testdir}/nginx.pid;\n";
-	$s .= "error_log $self->{_testdir}/error.log debug;\n";
+	$s .= "error_log $self->{_testdir}/error.log debug;\n"
+		unless $no_error_log;
 
 	$s .= $ENV{TEST_ANGIE_GLOBALS}
 		if $ENV{TEST_ANGIE_GLOBALS};
@@ -1263,7 +1401,7 @@ EOF
 
 sub http_post($;%) {
 	my ($url, %extra) = @_;
-	my $content_length = length($extra{body} // 0);
+	my $content_length = length($extra{body} // '');
 	return http(<<EOF, %extra);
 POST $url HTTP/1.0
 Host: localhost

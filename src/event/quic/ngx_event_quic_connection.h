@@ -177,8 +177,8 @@ typedef struct {
     ngx_quic_stream_peer_t            server;
     ngx_quic_stream_peer_t            client;
 
-    ngx_uint_t                        initialized;
-                                                 /* unsigned  initialized:1; */
+    unsigned                          initialized:1;
+    unsigned                          blocked:1;
 } ngx_quic_streams_t;
 
 
@@ -328,6 +328,8 @@ struct ngx_quic_connection_s {
     unsigned                          read_level:2;
     unsigned                          write_level:2;
 #endif
+    unsigned                          post_hs_done:1;
+    unsigned                          hs_done:1;
 };
 
 

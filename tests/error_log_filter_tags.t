@@ -35,7 +35,7 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     upstream u1 {
-        server 127.0.0.1:8099; # dead
+        server unix:%%TESTDIR%%/no-such.sock; # nobody should listen on it
         server 127.0.0.1:8082;
     }
 
@@ -87,7 +87,7 @@ EOF
 $t->run();
 
 like(http_get('/'), qr/PROXIED/, 'visited upstream');
-like(http_get('/bad_file.txt'), qr/404/, 'triggered missing file');
+like(http_get('/bad_file.txt'), qr/404 Not Found/, 'triggered missing file');
 
 $t->stop();
 

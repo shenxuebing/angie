@@ -38,6 +38,8 @@ typedef struct {
     ngx_flag_t                       half_close;
     ngx_stream_upstream_local_t     *local;
     ngx_flag_t                       socket_keepalive;
+    size_t                           socket_rcvbuf;
+    size_t                           socket_sndbuf;
 
 #if (NGX_STREAM_SSL)
     ngx_flag_t                       ssl_enable;
@@ -210,6 +212,20 @@ static ngx_command_t  ngx_stream_proxy_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_STREAM_SRV_CONF_OFFSET,
       offsetof(ngx_stream_proxy_srv_conf_t, socket_keepalive),
+      NULL },
+
+    { ngx_string("proxy_socket_rcvbuf"),
+      NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_STREAM_SRV_CONF_OFFSET,
+      offsetof(ngx_stream_proxy_srv_conf_t, socket_rcvbuf),
+      NULL },
+
+    { ngx_string("proxy_socket_sndbuf"),
+      NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_STREAM_SRV_CONF_OFFSET,
+      offsetof(ngx_stream_proxy_srv_conf_t, socket_sndbuf),
       NULL },
 
     { ngx_string("proxy_connect_timeout"),
@@ -559,6 +575,14 @@ ngx_stream_proxy_handler(ngx_stream_session_t *s)
 
     if (pscf->socket_keepalive) {
         u->peer.so_keepalive = 1;
+    }
+
+    if (pscf->socket_rcvbuf) {
+        u->peer.rcvbuf = (int) pscf->socket_rcvbuf;
+    }
+
+    if (pscf->socket_sndbuf) {
+        u->peer.sndbuf = (int) pscf->socket_sndbuf;
     }
 
     u->peer.type = c->type;
@@ -2426,6 +2450,10 @@ ngx_stream_proxy_next_upstream(ngx_stream_session_t *s)
         u->upstream_out = NULL;
     }
 
+    if (pc) {
+        u->state->bytes_sent = pc->sent;
+    }
+
     if (u->peer.sockaddr) {
         ngx_stream_upstream_free_peer(u, NGX_PEER_FAILED);
     }
@@ -2456,7 +2484,6 @@ ngx_stream_proxy_next_upstream(ngx_stream_session_t *s)
 #endif
 
         u->state->bytes_received = u->received;
-        u->state->bytes_sent = pc->sent;
 
         ngx_close_connection(pc);
         u->peer.connection = NULL;
@@ -2481,12 +2508,15 @@ ngx_stream_upstream_free_peer(ngx_stream_upstream_t *u, ngx_uint_t state)
         state = NGX_PEER_FAILED;
     }
 
-    if (pc->free) {
-        pc->free(pc, pc->data, state);
-    }
+    pc->connected = pc->connection ? 1 : 0;
+    pc->closed = pc->connection ? pc->connection->read->eof : 0;
 
     if (pc->close) {
         pc->close(pc, pc->data, state);
+    }
+
+    if (pc->free) {
+        pc->free(pc, pc->data, state);
     }
 
     pc->sockaddr = NULL;
@@ -2647,6 +2677,8 @@ ngx_stream_proxy_create_srv_conf(ngx_conf_t *cf)
     conf->proxy_protocol_conf.tlvs_ssl = NGX_CONF_UNSET_PTR;
     conf->local = NGX_CONF_UNSET_PTR;
     conf->socket_keepalive = NGX_CONF_UNSET;
+    conf->socket_rcvbuf = NGX_CONF_UNSET_SIZE;
+    conf->socket_sndbuf = NGX_CONF_UNSET_SIZE;
     conf->half_close = NGX_CONF_UNSET;
 
 #if (NGX_STREAM_SSL)
@@ -2733,6 +2765,10 @@ ngx_stream_proxy_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->socket_keepalive,
                               prev->socket_keepalive, 0);
+
+    ngx_conf_merge_size_value(conf->socket_rcvbuf, prev->socket_rcvbuf, 0);
+
+    ngx_conf_merge_size_value(conf->socket_sndbuf, prev->socket_sndbuf, 0);
 
     ngx_conf_merge_value(conf->half_close, prev->half_close, 0);
 

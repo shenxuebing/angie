@@ -276,6 +276,13 @@ ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
         /* if zone was restored, slab was re-created, restore zero */
         cache->shpool->log_nomem = 0;
 
+        /*
+         * if the zone was saved while it was being loaded, it holds the
+         * pid of a cache loader that is no longer running; reset it to
+         * let the loader finish loading the zone
+         */
+        cache->sh->loading = 0;
+
         return NGX_OK;
     }
 
@@ -590,6 +597,10 @@ ngx_http_file_cache_lock(ngx_http_request_t *r, ngx_http_cache_t *c)
         return NGX_HTTP_CACHE_SCARCE;
     }
 
+    if (r->main->blocked >= NGX_HTTP_MAX_BLOCKED) {
+        return NGX_HTTP_CACHE_SCARCE;
+    }
+
     c->waiting = 1;
 
     if (c->wait_time == 0) {
@@ -842,7 +853,9 @@ ngx_http_file_cache_aio_read(ngx_http_request_t *r, ngx_http_cache_t *c)
 
 #if (NGX_HAVE_FILE_AIO)
 
-    if (clcf->aio == NGX_HTTP_AIO_ON && ngx_file_aio) {
+    if (clcf->aio == NGX_HTTP_AIO_ON && ngx_file_aio
+        && r->main->blocked < NGX_HTTP_MAX_BLOCKED)
+    {
         n = ngx_file_aio_read(&c->file, c->buf->pos, c->body_start, 0, r->pool);
 
         if (n != NGX_AGAIN) {
@@ -867,7 +880,9 @@ ngx_http_file_cache_aio_read(ngx_http_request_t *r, ngx_http_cache_t *c)
 
 #if (NGX_THREADS)
 
-    if (clcf->aio == NGX_HTTP_AIO_THREADS) {
+    if (clcf->aio == NGX_HTTP_AIO_THREADS
+        && r->main->blocked < NGX_HTTP_MAX_BLOCKED)
+    {
         c->file.thread_task = c->thread_task;
         c->file.thread_handler = ngx_http_cache_thread_handler;
         c->file.thread_ctx = r;

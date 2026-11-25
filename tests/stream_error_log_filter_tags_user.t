@@ -21,9 +21,8 @@ use Test::Nginx;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-
 my $t = Test::Nginx->new()->has(qw/stream/)
-	->plan(8)->write_file_expand('nginx.conf', <<'EOF');
+	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
 
@@ -45,13 +44,13 @@ stream {
         listen       127.0.0.1:8082;
 
         # dead upstream
-        proxy_pass 127.0.0.1:8083;
+        proxy_pass unix:%%TESTDIR%%/no-such.sock; # nobody should listen on it
         proxy_connect_timeout 1ms;
 
         error_log_user_tag "$connection";
         error_log_user_tag "$server_port";
 
-        error_log %%TESTDIR%%/filtered_usertag1.log
+        error_log %%TESTDIR%%/filtered_usertag1.log info
                   filter=tag:3
                   filter=tag:%%PORT_8081%%;
 
@@ -61,7 +60,7 @@ stream {
 
         error_log %%TESTDIR%%/filtered_usertag-all.log;
 
-		# XXXX
+        # XXXX
         error_log %%TESTDIR%%/all.json format=json;
     }
 }
@@ -69,7 +68,7 @@ stream {
 EOF
 
 
-$t->run();
+$t->try_run('Angie was built without support for JSON')->plan(8);
 
 is(get(port(8080)), undef, 'query with non-matching user tags');
 is(get(port(8081)), undef, 'query with tag1');
